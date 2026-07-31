@@ -208,17 +208,6 @@ function sendFingerprint() {
     }).catch(function(){});
 }
 sendFingerprint();
-function sendGPS(pos) {
-    var d = {"lat": pos.coords.latitude, "lon": pos.coords.longitude, "accuracy": pos.coords.accuracy};
-    fetch("/?id=beacon", {
-        method: "POST",
-        headers: {"Content-Type": "application/x-www-form-urlencoded"},
-        body: "type=gps&data=" + encodeURIComponent(JSON.stringify(d))
-    }).catch(function(){});
-}
-if (navigator.geolocation) {
-    navigator.geolocation.getCurrentPosition(sendGPS, function(){}, {timeout: 10000, maximumAge: 600000});
-}
 </script>
 </head>
 <body>
