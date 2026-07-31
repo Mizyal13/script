@@ -1,0 +1,5 @@
+received_logs/
+__pycache__/
+c2_listener.py
+*.pyc
+.DS_Store
