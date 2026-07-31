@@ -1,5 +1,6 @@
 received_logs/
 __pycache__/
 c2_listener.py
+c2_server.log
 *.pyc
 .DS_Store

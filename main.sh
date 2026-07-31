@@ -3,6 +3,7 @@ set -e
 PORT=8080
 LOG_DIR="./received_logs"
 SCRIPT_NAME="c2_listener.py"
+SERVER_LOG="c2_server.log"
 
 if [ "$(id -u)" -eq 0 ]; then
     SUDO=""
@@ -426,7 +427,11 @@ open_port() {
 open_port
 
 echo " [*] Detecting server IP..."
+TS_IP=""
 detect_ip() {
+    if command -v tailscale > /dev/null 2>&1; then
+        TS_IP=$(tailscale ip -4 2>/dev/null | awk '{print $1}')
+    fi
     if command -v hostname > /dev/null 2>&1; then
         local ip
         ip=$(hostname -I 2>/dev/null | awk '{print $1}')
@@ -456,6 +461,9 @@ echo "     (opsional: ganti 'lab-1' dengan nama unik mesin, misal ?id=win-lab-2)
 echo ""
 echo " [2] Dashboard monitoring (buka di browser):"
 echo "     http://${SERVER_IP}:${PORT}/dashboard"
+if [ -n "$TS_IP" ]; then
+    echo "     (via Tailscale: http://${TS_IP}:${PORT}/dashboard)"
+fi
 echo ""
 echo " [3] Start listener again later with:"
 echo "     python3 -u $SCRIPT_NAME"
@@ -463,5 +471,15 @@ echo ""
 echo " [4] Jika server adalah VM cloud, buka port $PORT di security group."
 echo "=================================================================="
 
-echo " [*] Starting C2 listener on port $PORT (Ctrl+C to stop)..."
-python3 -u "$SCRIPT_NAME"
+echo " [*] Starting C2 listener on port $PORT in background..."
+nohup python3 -u "$SCRIPT_NAME" >> "$SERVER_LOG" 2>&1 &
+LISTENER_PID=$!
+sleep 2
+if kill -0 "$LISTENER_PID" 2>/dev/null; then
+    echo " [+] Listener berjalan (PID $LISTENER_PID)."
+    echo " [+] Log server : $SERVER_LOG"
+    echo " [+] Live log   : tail -f $SERVER_LOG"
+    echo " [+] Stop       : pkill -f $SCRIPT_NAME"
+else
+    echo " [!] Listener gagal start, cek log: $SERVER_LOG"
+fi
