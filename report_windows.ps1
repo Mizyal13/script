@@ -1,8 +1,14 @@
+param([string]$Server = "")
+
 $ServerIP = "172.16.225.135"
 $ServerPort = "8080"
 $MachineID = "win-lab-1"
-$Base = "http://" + $ServerIP + ":" + $ServerPort
 $AgentKey = ""
+if ($Server -match "https?://") {
+    $Base = $Server.TrimEnd('/')
+} else {
+    $Base = "http://" + $ServerIP + ":" + $ServerPort
+}
 
 function Get-SystemReport {
     $out = New-Object System.Text.StringBuilder

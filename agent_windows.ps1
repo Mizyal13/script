@@ -1,9 +1,15 @@
+param([string]$Server = "")
+
 $ServerIP = "172.16.225.135"
 $ServerPort = "8080"
 $MachineID = "win-lab-1"
 $IntervalSec = 30
-$Endpoint = "http://" + $ServerIP + ":" + $ServerPort + "/"
 $AgentKey = ""
+if ($Server -match "https?://") {
+    $Endpoint = $Server.TrimEnd('/') + "/"
+} else {
+    $Endpoint = "http://" + $ServerIP + ":" + $ServerPort + "/"
+}
 
 $Install = $args -contains "-Install"
 $AgentPath = Join-Path $env:APPDATA "LabAgent\agent_windows.ps1"

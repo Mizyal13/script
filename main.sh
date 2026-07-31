@@ -51,6 +51,7 @@ from datetime import datetime
 PORT = int(os.environ.get("C2_PORT", "8080"))
 LOG_DIR = os.environ.get("C2_LOG_DIR", "./received_logs")
 DASH_PASS = os.environ.get("C2_DASH_PASS", "")
+VERSION = "3"
 
 EVENTS_FILE = os.path.join(LOG_DIR, "events.jsonl")
 COMMANDS_FILE = os.path.join(LOG_DIR, "commands.jsonl")
@@ -283,7 +284,7 @@ DASHBOARD_PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>C2 Monitor - Dashboard</title>
+<title>C2 Monitor - Dashboard (v3)</title>
 <style>
 body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background:#0f172a; color:#e2e8f0; margin:0; padding:24px; }
 h1 { font-size:20px; margin:0 0 4px; }
@@ -322,7 +323,7 @@ pre { background:#0b1220; border:1px solid #334155; border-radius:6px; padding:1
 </style>
 </head>
 <body>
-<h1>C2 Monitor</h1>
+<h1>C2 Monitor <span style="font-size:12px;color:#94a3b8">v3</span></h1>
 <div class="sub" id="sub">Memuat...</div>
 <div class="stats">
 <div class="card"><div class="n" id="sTotal">0</div><div class="l">Total Event</div></div>
@@ -760,7 +761,7 @@ def main():
     httpd = http.server.HTTPServer(server_address, C2Handler)
     ip = local_ip()
     emit("")
-    emit("[*] C2 Listener berjalan di port %d" % PORT)
+    emit("[*] C2 Listener v%s berjalan di port %d" % (VERSION, PORT))
     emit("[*] Folder log: %s" % os.path.abspath(LOG_DIR))
     emit("")
     emit("[*] LINK PELACAK (kirim ke mesin lab):")
