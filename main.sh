@@ -458,6 +458,10 @@ setup_ngrok() {
         return 0
     fi
 
+    echo " [*] Menghentikan tunnel ngrok lama (jika ada)..."
+    pkill -f "ngrok http" 2>/dev/null || true
+    sleep 1
+
     echo " [*] Starting ngrok tunnel -> localhost:$NGROK_PORT ..."
     nohup ngrok http "$NGROK_PORT" --log=stdout > ngrok.log 2>&1 &
     NGROK_PID=$!
@@ -522,6 +526,10 @@ echo ""
 echo " [4] Jika server adalah VM cloud, buka port $PORT di security group."
 echo "=================================================================="
 
+echo " [*] Menghentikan listener lama (jika ada)..."
+pkill -f "$SCRIPT_NAME" 2>/dev/null || true
+sleep 1
+
 echo " [*] Starting C2 listener on port $PORT in background..."
 nohup python3 -u "$SCRIPT_NAME" >> "$SERVER_LOG" 2>&1 &
 LISTENER_PID=$!
@@ -533,6 +541,7 @@ if kill -0 "$LISTENER_PID" 2>/dev/null; then
     echo " [+] Stop       : pkill -f $SCRIPT_NAME"
 else
     echo " [!] Listener gagal start, cek log: $SERVER_LOG"
+    tail -5 "$SERVER_LOG" 2>/dev/null || true
 fi
 
 NGROK_URL=""
