@@ -430,19 +430,34 @@ open_port
 
 setup_ngrok() {
     if ! command -v ngrok > /dev/null 2>&1; then
-        echo " [*] ngrok belum terpasang, memasang via apt..."
+        echo " [*] ngrok belum terpasang..."
         if command -v apt-get > /dev/null 2>&1; then
+            echo " [*] Memasang ngrok via apt..."
             curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | $SUDO tee /etc/apt/trusted.gpg.d/ngrok.asc > /dev/null 2>&1 || true
             echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | $SUDO tee /etc/apt/sources.list.d/ngrok.list > /dev/null 2>&1 || true
             $SUDO apt-get update > /dev/null 2>&1 || true
             $SUDO apt-get install -y ngrok > /dev/null 2>&1 || echo " [!] Gagal install ngrok via apt."
+        else
+            echo " [!] Install ngrok manual: https://ngrok.com/download"
         fi
     fi
-    if ! command -v ngrok > /dev/null 2>&1; then
-        echo " [!] Install ngrok manual: https://ngrok.com/download, lalu jalankan ulang."
+
+    HAS_TOKEN=0
+    if [ -n "$NGROK_AUTH_TOKEN" ]; then
+        ngrok config add-authtoken "$NGROK_AUTH_TOKEN" > /dev/null 2>&1 || true
+        HAS_TOKEN=1
+    elif command -v ngrok > /dev/null 2>&1 && ngrok config check > /dev/null 2>&1; then
+        HAS_TOKEN=1
+    fi
+
+    if [ "$HAS_TOKEN" -eq 0 ]; then
+        echo " [!] Authtoken ngrok belum ada. Salah satu cara:"
+        echo "     1) Sekali saja di server:  ngrok config add-authtoken TOKEN_ANDA"
+        echo "        (lalu curl | bash polos langsung pakai ngrok)"
+        echo "     2) Atau setiap run:         curl -fsSL URL | NGROK_AUTH_TOKEN=TOKEN_ANDA bash"
         return 0
     fi
-    ngrok config add-authtoken "$NGROK_AUTH_TOKEN" > /dev/null 2>&1 || true
+
     echo " [*] Starting ngrok tunnel -> localhost:$NGROK_PORT ..."
     nohup ngrok http "$NGROK_PORT" --log=stdout > ngrok.log 2>&1 &
     NGROK_PID=$!
@@ -521,13 +536,7 @@ else
 fi
 
 NGROK_URL=""
-if [ -n "$NGROK_AUTH_TOKEN" ]; then
-    setup_ngrok
-else
-    echo " [!] NGROK_AUTH_TOKEN kosong -> ngrok dilewati."
-    echo "     Daftar gratis di https://dashboard.ngrok.com lalu jalankan ulang:"
-    echo "     NGROK_AUTH_TOKEN=TOKEN_ANDA bash main.sh"
-fi
+setup_ngrok
 
 echo ""
 echo "=================================================================="
