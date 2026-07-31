@@ -2,7 +2,7 @@ param([string]$Server = "")
 
 $ServerIP = "172.16.225.135"
 $ServerPort = "8080"
-$MachineID = "win-lab-1"
+$MachineID = "lab-1"
 $IntervalSec = 30
 $AgentKey = ""
 if ($Server -match "https?://") {
