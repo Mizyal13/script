@@ -39,7 +39,7 @@ C "Clearing /tmp files older than 2 days"
 find /tmp -type f -mtime +2 -delete 2>/dev/null || true
 
 if command -v snap >/dev/null 2>&1; then
-    C "Limiting snap revision retention"
+    C "Limiting snap revision retention" 
     snap set system refresh.retain=2 || true
 fi
 
