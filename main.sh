@@ -7,6 +7,54 @@ SERVER_LOG="c2_server.log"
 NGROK_AUTH_TOKEN="${NGROK_AUTH_TOKEN:-}"
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/Mizyal13/script/main}"
 
+# ===========================================================================
+# MULTI-FUNCTIONAL LAUNCHER
+#   ./main.sh          : interactive menu (C2 Server | Red Team Lab)
+#   ./main.sh lab      : Red Team Lab directly (auto reset + refresh + install)
+#   ./main.sh server   : C2 Server deployer (original behavior, unchanged)
+#   curl main.sh|bash  : C2 Server deployer (original behavior, non-interactive)
+# ===========================================================================
+if [ -t 0 ] && [ -z "${1:-}" ]; then
+    echo
+    echo "=================================================="
+    echo " Multi-Functional Security Tool"
+    echo "=================================================="
+    echo "  1) C2 Server        - original C2 deployer"
+    echo "  2) Red Team Lab     - automated lab (Sliver/Metasploit, own machines)"
+    echo "  3) Cancel"
+    echo "=================================================="
+    printf " Select [1-3]: "
+    if ! read -r CHOICE; then
+        echo
+        echo " [-] No input - exiting."
+        exit 0
+    fi
+    case "$CHOICE" in
+        1)     MODE="server" ;;
+        2)     MODE="lab"    ;;
+        *)     echo " [-] Cancelled."; exit 0 ;;
+    esac
+fi
+
+MODE="${MODE:-${1:-}}"
+case "$MODE" in
+    lab|--lab|lab.sh)
+        echo " [*] Launching Red Team Lab (auto reset + refresh + install)..."
+        curl -fsSL "${RAW_BASE}/lab.sh" | bash -s -- "${@:2}"
+        exit $?
+        ;;
+    server|--server)
+        : # fall through to original main.sh behavior below
+        ;;
+    help|-h|--help)
+        echo " Usage:"
+        echo "   ./main.sh            interactive menu"
+        echo "   ./main.sh lab        Red Team Lab"
+        echo "   ./main.sh server     C2 Server deployer"
+        exit 0
+        ;;
+esac
+
 if [ "$(id -u)" -eq 0 ]; then
     SUDO=""
 else
