@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 # ======================================================================
-# Red Team Lab Bootstrap - one-command server setup
+# Red Team Lab - ONE COMMAND, fully automatic (reset + refresh + heal)
 #
 #   curl -fsSL https://raw.githubusercontent.com/Mizyal13/script/main/lab.sh | bash
 #
-# What this does:
-#   - Cleans up disk space and verifies room before large installs
-#   - Installs Sliver C2     (official BishopFox installer)
-#   - Installs Metasploit    (official Rapid7 installer, apt fallback)
-#   - Initializes msfdb (Metasploit's PostgreSQL)
-#   - Downloads the full lab guide + detection pack into ~/redteam-lab/
-#   - Prints the server IP to use with `generate --mtls <IP>`
+# Every run does everything, fresh:
+#   1. RESET   - wipes the previous lab folder, re-pulls latest from repo
+#   2. REFRESH - re-downloads all guides + detection pack (always current)
+#   3. HEAL    - clears broken apt state, frees disk, verifies space
+#   4. INSTALL - Sliver (official installer) + Metasploit (official, apt
+#                fallback) + msfdb init - all idempotent, safe to re-run
+#   5. REPORT  - prints server IP + quick start block
+#
+# Optional env toggles:
+#   LAB_KEEP_FILES=1   keep local notes in $LAB_DIR (skip the wipe)
+#   LAB_SKIP_INSTALL=1 refresh files only, don't touch installed tools
+#   REDTEAM_LAB_DIR=/path   change install location (default ~/redteam-lab)
 #
 # SCOPE: practice against machines YOU OWN. Keep lab targets isolated
 # from anything you do not control.
@@ -23,7 +28,44 @@ LAB_DIR="${REDTEAM_LAB_DIR:-$HOME/redteam-lab}"
 STEP() { echo; echo "==> $*"; }
 
 # ------------------------------------------------------------------
-# Housekeeping: clear broken apt state + free disk so big installs fit.
+# 1. RESET: wipe old lab folder every run unless told to keep it.
+#    This guarantees "always fresh" - the same intent as a re-deploy.
+# ------------------------------------------------------------------
+reset_lab() {
+  if [ "${LAB_KEEP_FILES:-0}" != "1" ]; then
+    echo "    ($LAB_DIR being reset for a fresh copy)"
+    rm -rf "$LAB_DIR"
+  fi
+  mkdir -p "$LAB_DIR/detections"
+}
+
+# ------------------------------------------------------------------
+# 2. REFRESH: pull the latest versions of every lab file from the repo.
+# ------------------------------------------------------------------
+refresh_lab() {
+  declare -A FILES=(
+    ["lab/README.md"]="README.md"
+    ["lab/setup-attacker.sh"]="setup-attacker.sh"
+    ["lab/setup-victims.md"]="setup-victims.md"
+    ["lab/sliver-quickstart.md"]="sliver-quickstart.md"
+    ["lab/msf-quickstart.md"]="msf-quickstart.md"
+    ["lab/phishing-sim-drill.md"]="phishing-sim-drill.md"
+    ["lab/exercises-and-detection.md"]="exercises-and-detection.md"
+    ["lab/detections/persist_runkey.yar"]="detections/persist_runkey.yar"
+    ["lab/detections/beacon_http.yar"]="detections/beacon_http.yar"
+    ["lab/detections/create_runkey.yml"]="detections/create_runkey.yml"
+    ["lab/detections/periodic_http_beacon.yml"]="detections/periodic_http_beacon.yml"
+  )
+  for src in "${!FILES[@]}"; do
+    dst="$LAB_DIR/${FILES[$src]}"
+    curl -fsSL "$REPO_RAW/$src" -o "$dst"
+  done
+  chmod +x "$LAB_DIR/setup-attacker.sh"
+  echo "    Lab files refreshed at $LAB_DIR"
+}
+
+# ------------------------------------------------------------------
+# 3. HEAL: fix broken apt state + free disk before installs.
 # ------------------------------------------------------------------
 housekeeping() {
   echo "    before: $(df -h / | awk 'NR==2 {print $4" free of "$2}')"
@@ -34,130 +76,100 @@ housekeeping() {
 }
 
 # ------------------------------------------------------------------
-STEP "1/8  Checking prerequisites"
+STEP "1/6  Prerequisites"
 # ------------------------------------------------------------------
-if [ "$(id -u)" -eq 0 ]; then
-  echo "[-] Run as a normal user with sudo rights, not as root."
-  exit 1
-fi
+[ "$(id -u)" -ne 0 ] || { echo "[-] Run as a normal user with sudo rights, not as root."; exit 1; }
 command -v sudo >/dev/null 2>&1 || { echo "[-] sudo is required."; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo "[*] Installing curl..."; sudo apt-get update -qq && sudo apt-get install -y -qq curl; }
 command -v jq   >/dev/null 2>&1 || { echo "[*] Installing jq...";   sudo apt-get update -qq && sudo apt-get install -y -qq jq; }
 echo "    Arch: $(dpkg --print-architecture 2>/dev/null || uname -m)"
 
 # ------------------------------------------------------------------
-STEP "2/8  Disk space check + cleanup"
+STEP "2/6  RESET + REFRESH lab files"
 # ------------------------------------------------------------------
-housekeeping
+reset_lab
+refresh_lab
 
-# ------------------------------------------------------------------
-STEP "3/8  Installing Sliver (official installer)"
-# ------------------------------------------------------------------
-if command -v sliver >/dev/null 2>&1; then
-  echo "[+] sliver already present"
+if [ "${LAB_SKIP_INSTALL:-0}" = "1" ]; then
+  echo "    LAB_SKIP_INSTALL=1 - tools left untouched."
 else
-  echo "[*] curl https://sliver.sh/install | sudo bash"
-  curl https://sliver.sh/install | sudo bash
-  echo "[+] sliver installed"
-fi
+  # ------------------------------------------------------------------
+  STEP "3/6  HEAL disk state"
+  # ------------------------------------------------------------------
+  housekeeping
 
-# ------------------------------------------------------------------
-STEP "4/8  Installing Metasploit"
-# ------------------------------------------------------------------
-if command -v msfconsole >/dev/null 2>&1; then
-  echo "[+] msfconsole already present"
-else
-  housekeeping   # Sliver unpacked a lot; make room before Metasploit
-  echo "[*] Fetching official msfinstall script (Rapid7 omnibus)..."
-  cd /tmp
-  curl -L "https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb" -o msfinstall
-  chmod +x msfinstall
-  echo "[*] Running msfinstall (downloads the framework - takes a while)..."
-  if sudo ./msfinstall; then
-    echo "[+] Metasploit installed via msfinstall"
+  # ------------------------------------------------------------------
+  STEP "4/6  Install/verify Sliver (idempotent)"
+  # ------------------------------------------------------------------
+  if command -v sliver >/dev/null 2>&1; then
+    echo "[+] sliver already present"
   else
-    echo "[!] msfinstall failed - retrying via plain apt (repo was already added)..."
-    housekeeping
-    sudo apt-get update || true
-    if sudo apt-get install -y metasploit-framework; then
-      echo "[+] Metasploit installed via apt"
-    else
-      echo "[!] Metasploit could not be installed."
-      echo "    Likely causes:"
-      echo "      - Disk still full:   df -h /"
-      echo "      - arm64: Rapid7's apt repo may lack arm64 packages."
-      echo "        Check:  apt-cache policy metasploit-framework"
-      echo "        Docs:   https://docs.metasploit.com/docs/using-metasploit/install.html"
-      echo "    The lab still works with Sliver alone; re-run this script"
-      echo "    once the above is sorted and it will pick up where it left off."
-    fi
+    echo "[*] curl https://sliver.sh/install | sudo bash"
+    curl https://sliver.sh/install | sudo bash
+    echo "[+] sliver installed"
   fi
-  cd -
+
+  # ------------------------------------------------------------------
+  STEP "5/6  Install/verify Metasploit (idempotent, apt fallback)"
+  # ------------------------------------------------------------------
+  if command -v msfconsole >/dev/null 2>&1; then
+    echo "[+] msfconsole already present"
+  else
+    housekeeping   # Sliver unpacked a lot; make room first
+    echo "[*] Fetching official msfinstall script..."
+    cd /tmp
+    curl -L "https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb" -o msfinstall
+    chmod +x msfinstall
+    echo "[*] Running msfinstall (downloads the framework - takes a while)..."
+    if sudo ./msfinstall; then
+      echo "[+] Metasploit installed via msfinstall"
+    else
+      echo "[!] msfinstall failed - retrying via plain apt..."
+      housekeeping
+      sudo apt-get update || true
+      if sudo apt-get install -y metasploit-framework; then
+        echo "[+] Metasploit installed via apt"
+      else
+        echo "[!] Metasploit could not be installed."
+        echo "    Check disk:  df -h /"
+        echo "    Check repo:  apt-cache policy metasploit-framework"
+        echo "    (arm64 hosts may lack Rapid7 packages - Sliver alone still runs the lab.)"
+      fi
+    fi
+    cd -
+  fi
+
+  # ------------------------------------------------------------------
+  STEP "6/6  Initialize msfdb (idempotent)"
+  # ------------------------------------------------------------------
+  command -v msfdb >/dev/null 2>&1 && { sudo msfdb init >/dev/null 2>&1 || echo "[!] msfdb init had issues (check: msfdb status)"; }
 fi
 
 # ------------------------------------------------------------------
-STEP "5/8  Initializing Metasploit database"
-# ------------------------------------------------------------------
-command -v msfdb >/dev/null 2>&1 && { sudo msfdb init >/dev/null 2>&1 || echo "[!] msfdb init had issues (check: msfdb status)"; }
-
-# ------------------------------------------------------------------
-STEP "6/8  Downloading lab guides + detection pack"
-# ------------------------------------------------------------------
-mkdir -p "$LAB_DIR/detections"
-
-declare -A FILES=(
-  ["lab/README.md"]="README.md"
-  ["lab/setup-attacker.sh"]="setup-attacker.sh"
-  ["lab/setup-victims.md"]="setup-victims.md"
-  ["lab/sliver-quickstart.md"]="sliver-quickstart.md"
-  ["lab/msf-quickstart.md"]="msf-quickstart.md"
-  ["lab/phishing-sim-drill.md"]="phishing-sim-drill.md"
-  ["lab/exercises-and-detection.md"]="exercises-and-detection.md"
-  ["lab/detections/persist_runkey.yar"]="detections/persist_runkey.yar"
-  ["lab/detections/beacon_http.yar"]="detections/beacon_http.yar"
-  ["lab/detections/create_runkey.yml"]="detections/create_runkey.yml"
-  ["lab/detections/periodic_http_beacon.yml"]="detections/periodic_http_beacon.yml"
-)
-
-for src in "${!FILES[@]}"; do
-  dst="$LAB_DIR/${FILES[$src]}"
-  echo "[*]   $src -> $dst"
-  curl -fsSL "$REPO_RAW/$src" -o "$dst"
-done
-chmod +x "$LAB_DIR/setup-attacker.sh"
-echo "[+] Lab files at $LAB_DIR"
-
-# ------------------------------------------------------------------
-STEP "7/8  Detecting server IP for the C2 listener"
+# Final report
 # ------------------------------------------------------------------
 PUB_IP=""
 command -v curl >/dev/null 2>&1 && PUB_IP=$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)
-echo "    Public IP : ${PUB_IP:-<not detectable>}"
-echo "    Local IP  : $(hostname -I 2>/dev/null | awk '{print $1}')"
-
-# ------------------------------------------------------------------
-STEP "8/8  Verifying install"
-# ------------------------------------------------------------------
-echo
-echo "--- Sliver ---"
-sliver version 2>/dev/null | grep -E "Version|OS/Arch" || sliver version || true
-echo
-echo "--- Metasploit ---"
-msfconsole --version 2>/dev/null | head -n2 || echo "    (not installed)"
-echo
-echo "--- Databases ---"
-msfdb status 2>/dev/null | tail -n3 || true
 
 echo
 echo "=============================================================="
-echo " LAB READY. Quick start:"
-echo "  1) sliver"
-echo "     generate --mtls ${PUB_IP:-<SERVER_IP>} --os windows --arch amd64 --save /tmp/"
-echo "     mtls"
-echo "  2) Guides:  $LAB_DIR/sliver-quickstart.md  and  msf-quickstart.md"
-echo "     Phishing sim drill:  $LAB_DIR/phishing-sim-drill.md"
-echo "  3) Detection pack:  $LAB_DIR/detections/"
-echo "  4) If targets are cloud VMs, open the mTLS port (default 8888)"
-echo "     in the server firewall; if they are local VMs, follow"
-echo "     setup-victims.md and keep them isolated."
+echo " LAB READY - everything is fresh and verified."
+echo "=============================================================="
+echo "  IP this run  : ${PUB_IP:-<detect failed>} (public)"
+echo "                  $(hostname -I 2>/dev/null | awk '{print $1}') (local)"
+echo
+echo "  Sliver       : $(command -v sliver >/dev/null 2>&1 && sliver version 2>/dev/null | grep -E 'Version' | head -n1 || echo 'not installed')"
+echo "  Metasploit   : $(command -v msfconsole >/dev/null 2>&1 && msfconsole --version 2>/dev/null | head -n1 || echo 'not installed')"
+echo
+echo "  Quick start  :"
+echo "    sliver"
+echo "    generate --mtls ${PUB_IP:-<SERVER_IP>} --os windows --arch amd64 --save /tmp/"
+echo "    mtls"
+echo
+echo "  Guides       : $LAB_DIR/sliver-quickstart.md"
+echo "                 $LAB_DIR/msf-quickstart.md"
+echo "                 $LAB_DIR/phishing-sim-drill.md"
+echo "  Detections   : $LAB_DIR/detections/"
+echo
+echo "  Re-run anytime to auto reset + refresh. Keep targets isolated."
 echo "=============================================================="
