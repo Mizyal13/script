@@ -1,0 +1,13 @@
+title: Periodic HTTP Polling to Fixed C2
+id: lab-beacon-001
+status: test
+description: Detects regular HTTP GET/POST to a single external host (interval-based beacon)
+logsource:
+  category: dns_query
+  product: windows
+detection:
+  selection:
+    QueryName|endswith: ".example.com" # replace with your lab C2 domain
+  timeframe: 10m
+  condition: selection | count() > 5
+level: high

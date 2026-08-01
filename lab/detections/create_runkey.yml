@@ -1,0 +1,12 @@
+title: CurrentUser Run Key Persistence
+id: lab-runkey-001
+status: test
+description: Detects creation of a value under HKCU CurrentVersion\Run (persistence)
+logsource:
+  category: registry_event
+  product: windows
+detection:
+  selection:
+    TargetObject|contains: 'HKCU\Software\Microsoft\Windows\CurrentVersion\Run'
+  condition: selection
+level: medium
