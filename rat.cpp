@@ -1,6 +1,5 @@
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <winsock2.h>
-#include <ws2tcpip.h>
 #include <windows.h>
 #include <iostream>
 #include <string>
@@ -66,23 +65,28 @@ static bool httpRequest(const std::string& host, int port, const std::string& me
     char portStr[16];
     snprintf(portStr, sizeof(portStr), "%d", port);
 
-    addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET) return false;
 
-    addrinfo* res = NULL;
-    if (getaddrinfo(host.c_str(), portStr, &hints, &res) != 0) return false;
+    sockaddr_in server;
+    memset(&server, 0, sizeof(server));
+    server.sin_family = AF_INET;
+    server.sin_port = htons((u_short)port);
 
-    SOCKET sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (sock == INVALID_SOCKET) { freeaddrinfo(res); return false; }
+    server.sin_addr.s_addr = inet_addr(host.c_str());
+    if (server.sin_addr.s_addr == INADDR_NONE) {
+        hostent* he = gethostbyname(host.c_str());
+        if (!he) {
+            closesocket(sock);
+            return false;
+        }
+        memcpy(&server.sin_addr, he->h_addr, he->h_length);
+    }
 
-    if (connect(sock, res->ai_addr, (int)res->ai_addrlen) == SOCKET_ERROR) {
+    if (connect(sock, (sockaddr*)&server, sizeof(server)) == SOCKET_ERROR) {
         closesocket(sock);
-        freeaddrinfo(res);
         return false;
     }
-    freeaddrinfo(res);
 
     std::string req = method + " " + path + " HTTP/1.1\r\n";
     req += "Host: " + host + ":" + portStr + "\r\n";
